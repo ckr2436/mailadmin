@@ -41,13 +41,12 @@ hash_password() {
 PW_HASH="$(hash_password "$PASSWORD")"
 
 MYSQL_PWD="$DB_ADMIN_PASS" mysql --protocol=socket -S "$DB_SOCKET" -u "$DB_ADMIN_USER" "$DB_NAME" <<SQL
-source $ROOT_DIR/migrations/001_mailadmin_tables.sql;
-INSERT INTO app_admin_users(username,password_hash,role,active)
-VALUES('${USERNAME//'/\'}','${PW_HASH//'/\'}','${ROLE//'/\'}',1)
+INSERT INTO app_admin_users(username,password_hash,role,is_active)
+VALUES('${USERNAME//\'/\\\'}','${PW_HASH//\'/\\\'}','${ROLE//\'/\\\'}',1)
 ON DUPLICATE KEY UPDATE
   password_hash=VALUES(password_hash),
   role=VALUES(role),
-  active=1;
+  is_active=1;
 SQL
 
 echo "OK: admin user upserted: $USERNAME ($ROLE)"
