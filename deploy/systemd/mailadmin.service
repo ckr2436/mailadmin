@@ -1,0 +1,30 @@
+[Unit]
+Description=MailOps Go API
+After=network-online.target mysqld.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/apps/mailops/backend
+EnvironmentFile=/opt/apps/mailops/deploy/systemd/mailadmin.env
+ExecStart=/opt/apps/mailops/backend/bin/mailadmin-api
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/opt/apps/mailops/backend /opt/apps/mailops/frontend/dist /tmp
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

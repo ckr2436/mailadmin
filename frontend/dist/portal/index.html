@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>MailOps Portal</title>
+  <link rel="stylesheet" href="/assets/app.css"/>
+</head>
+<body>
+  <div class="login-shell">
+    <div class="login-card card">
+      <div class="brand">Tenant Mail Portal</div>
+      <div class="muted" style="margin-bottom:18px">mail.myupona.com · 邮箱用户中心</div>
+
+      <div id="portalLoginBox">
+        <div class="form-row">
+          <div><select id="portalWorkspace"></select></div>
+          <div><input id="portalEmail" placeholder="user@domain.com"></div>
+          <div><input id="portalPassword" type="password" placeholder="password"></div>
+          <div><button id="portalBtnLogin">登录</button></div>
+        </div>
+        <div class="smalltext">会校验邮箱所属域名是否在所选 workspace 下。</div>
+        <div id="portalLoginMsg" class="hidden"></div>
+      </div>
+
+      <div id="portalApp" class="hidden">
+        <div class="toolbar" style="margin-bottom:12px">
+          <span id="portalSessionBadge" class="badge"></span>
+          <div class="grow"></div>
+          <button id="portalBtnReload" class="secondary small">刷新</button>
+          <button id="portalBtnLogout" class="ghost small">退出</button>
+        </div>
+
+        <div id="portalProfileCard" class="card"></div>
+
+        <hr/>
+        <div class="grid">
+          <div class="col-6">
+            <div class="card">
+              <h3>Aliases</h3>
+              <div id="portalAliases" class="list"></div>
+            </div>
+          </div>
+          <div class="col-6">
+            <div class="card">
+              <h3>修改密码</h3>
+              <div class="form-row">
+                <div><input id="portalCurrentPassword" type="password" placeholder="当前密码"></div>
+                <div><input id="portalNewPassword" type="password" placeholder="新密码"></div>
+                <div><button id="portalBtnPassword">更新密码</button></div>
+              </div>
+              <div id="portalPwdMsg" class="hidden"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="smalltext" style="margin-top:14px">收发邮件请继续使用你的 IMAP/SMTP 客户端或 Webmail；这里是控制台门户，不替代完整收件箱。</div>
+    </div>
+  </div>
+  <script src="/assets/portal.js"></script>
+</body>
+</html>
