@@ -1827,8 +1827,29 @@ func (s *Server) handleHealthReady(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 405, "METHOD_NOT_ALLOWED", "Method not allowed")
 		return
 	}
-	_, err := s.execSQL(r.Context(), "ro", "SELECT 1;")
-	writeJSON(w, 200, map[string]any{"ok": true, "db_ok": err == nil, "time": time.Now().UTC().Format(time.RFC3339)})
+	dbOK := s.checkMySQLReady(r.Context()) == nil
+	redisOK := s.checkRedisReady(r.Context()) == nil
+	ok := dbOK && redisOK
+	status := http.StatusOK
+	if !ok {
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(w, status, map[string]any{
+		"ok":       ok,
+		"db_ok":    dbOK,
+		"redis_ok": redisOK,
+		"time":     time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+func (s *Server) checkMySQLReady(ctx context.Context) error {
+	_, err := s.execSQL(ctx, "ro", "SELECT 1;")
+	return err
+}
+
+func (s *Server) checkRedisReady(ctx context.Context) error {
+	_, err := s.redisRun(ctx, "PING")
+	return err
 }
 func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -3042,6 +3063,14 @@ func main() {
 	srv := &Server{cfg: cfg, logger: logger, loginAttempts: map[string]loginAttempt{}, webmailEncKey: encKey}
 	if err := srv.ensureMetaTables(context.Background()); err != nil {
 		logger.Fatalf("ensure meta tables failed: %v", err)
+	}
+	startupCtx, startupCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer startupCancel()
+	if err := srv.checkMySQLReady(startupCtx); err != nil {
+		logger.Fatalf("startup dependency check failed: mysql not ready: %v", err)
+	}
+	if err := srv.checkRedisReady(startupCtx); err != nil {
+		logger.Fatalf("startup dependency check failed: redis not ready: %v", err)
 	}
 	httpServer := &http.Server{
 		Addr:              cfg.AppAddr,
