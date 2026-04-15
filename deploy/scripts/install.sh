@@ -5,6 +5,8 @@ APP_ROOT="${1:-/opt/apps/mailops}"
 SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BACKEND_ENV="$APP_ROOT/backend/.env"
 SYSTEMD_ENV="$APP_ROOT/deploy/systemd/mailadmin.env"
+SERVICE_USER="${SERVICE_USER:-mailops}"
+SERVICE_GROUP="${SERVICE_GROUP:-mailops}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -17,6 +19,22 @@ if [ -f "$SYSTEMD_ENV" ]; then
 fi
 
 rsync -a --delete "$SRC_ROOT/" "$APP_ROOT/"
+
+if [ "$(id -u)" -eq 0 ]; then
+  NOLOGIN_SHELL="$(command -v nologin || true)"
+  if [ -z "$NOLOGIN_SHELL" ]; then
+    NOLOGIN_SHELL="/usr/sbin/nologin"
+  fi
+  if ! getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
+    groupadd --system "$SERVICE_GROUP"
+  fi
+  if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
+    useradd --system --gid "$SERVICE_GROUP" --home-dir "$APP_ROOT" --shell "$NOLOGIN_SHELL" "$SERVICE_USER"
+  fi
+  chown -R "$SERVICE_USER:$SERVICE_GROUP" "$APP_ROOT/backend" "$APP_ROOT/frontend/dist"
+else
+  echo "warning: not running as root; unable to provision $SERVICE_USER/$SERVICE_GROUP or adjust ownership"
+fi
 
 if [ -f "$TMP_DIR/backend.env" ]; then
   install -m 600 "$TMP_DIR/backend.env" "$BACKEND_ENV"
