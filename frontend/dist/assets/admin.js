@@ -13,13 +13,13 @@ const state = {
 async function api(path, opts={}) {
   const res = await fetch(path, {
     credentials: 'include',
-    headers: {'Content-Type':'application/json', ...(opts.headers||{})},
+    headers: {'Content-Type':'application/json', ...(csrfToken() ? {'X-CSRF-Token': csrfToken()} : {}), ...(opts.headers||{})},
     ...opts
   });
   const ct = res.headers.get('content-type') || '';
   const data = ct.includes('application/json') ? await res.json() : await res.text();
   if (!res.ok) {
-    const msg = data?.message || data?.error || data?.code || String(data);
+    const msg = data?.error?.message || data?.message || data?.error?.code || data?.code || 'Request failed';
     throw new Error(msg);
   }
   return data;
@@ -34,6 +34,7 @@ function hideBox(id){ const el=qs(id); if(el) el.classList.add('hidden'); }
 function badge(active){ return `<span class="badge ${active ? 'green':'red'}">${active ? 'active':'disabled'}</span>`; }
 function yesno(v){ return v ? '✓' : '—'; }
 function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
+function csrfToken(){ const pair = document.cookie.split('; ').find(v=>v.startsWith('mailadmin_csrf_')); return pair ? decodeURIComponent(pair.split('=')[1] || '') : ''; }
 
 function buildTabs() {
   const tabs = [
@@ -125,7 +126,7 @@ async function loadAliases(){
 async function loadHealth(){
   try {
     const data = await api('/api/v1/platform/mail/health/maps');
-    qs('#mapsBox').textContent = (data.items || []).map(x => `# ${x.path}\n${x.content}`).join('\n\n');
+    qs('#mapsBox').textContent = (data.items || []).map(x => `${x.path} | parse_ok=${x.parse_ok} | required_complete=${x.required_complete}`).join('\n');
   } catch(e) {
     qs('#mapsBox').textContent = `读取失败：${e.message}`;
   }
@@ -263,7 +264,7 @@ function renderAdmins(){
     <td>${escapeHtml(a.username)}</td>
     <td>${escapeHtml(a.role)}</td>
     <td>${badge(a.active)}</td>
-    <td><span class="smalltext">${escapeHtml((a.allowed_workspaces||[]).join(', '))}</span></td>
+    <td><span class="smalltext">${escapeHtml((a.workspaces||[]).join(', '))}</span></td>
     <td class="toolbar">
       <button class="small secondary" data-toggle-admin="${a.username}" data-active="${a.active ? '0':'1'}">${a.active ? '停用':'启用'}</button>
       <button class="small ghost" data-password-admin="${a.username}">改密</button>

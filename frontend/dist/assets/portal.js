@@ -4,7 +4,7 @@ async function api(path, opts={}) {
   const res = await fetch(path, {credentials:'include', headers:{'Content-Type':'application/json', ...(opts.headers||{})}, ...opts});
   const ct = res.headers.get('content-type')||'';
   const data = ct.includes('application/json') ? await res.json() : await res.text();
-  if(!res.ok){ throw new Error(data?.message || data?.code || String(data)); }
+  if(!res.ok){ throw new Error(data?.error?.message || data?.message || data?.error?.code || data?.code || 'Request failed'); }
   return data;
 }
 function showBox(id, kind, msg){ const el=qs(id); el.className=kind; el.textContent=msg; el.classList.remove('hidden'); }
@@ -12,7 +12,7 @@ function hideBox(id){ const el=qs(id); if(el) el.classList.add('hidden'); }
 function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
 
 let currentWorkspace = 'default';
-let mailPassword = '';
+let webmailToken = '';
 async function loadTenantOptions(){
   const data = await api('/api/v1/tenants');
   const items = data.items || [];
@@ -23,8 +23,16 @@ async function loadTenantOptions(){
   sel.onchange = ()=> currentWorkspace = sel.value;
 }
 function portalPath(suffix){ return `/api/v1/tenants/${encodeURIComponent(currentWorkspace)}/mail/${suffix}`; }
-function mailHeaders(){
-  return mailPassword ? {'X-Mail-Password': mailPassword} : {};
+function csrfToken(){
+  const pair = document.cookie.split('; ').find(v=>v.startsWith('mailadmin_csrf_'));
+  return pair ? decodeURIComponent(pair.split('=').slice(1).join('=')) : '';
+}
+function authHeaders(){
+  const headers = {};
+  const csrf = csrfToken();
+  if (csrf) headers['X-CSRF-Token'] = csrf;
+  if (webmailToken) headers.Authorization = `Bearer ${webmailToken}`;
+  return headers;
 }
 
 async function refreshPortalSession(){
@@ -34,7 +42,7 @@ async function refreshPortalSession(){
     qs('#portalApp').classList.remove('hidden');
     qs('#portalSessionBadge').textContent = `${data.email || data.subject || 'session'} · ${data.workspace || currentWorkspace}`;
     await Promise.all([loadProfile(), loadAliases()]);
-    if(mailPassword){ await loadInbox(); }
+    if(webmailToken){ await loadInbox(); }
   }catch(e){
     qs('#portalLoginBox').classList.remove('hidden');
     qs('#portalApp').classList.add('hidden');
@@ -51,7 +59,7 @@ async function loadProfile(){
       <div class="list-item"><b>Domain</b><div>${escapeHtml(p.domain || '')}</div></div>
       <div class="list-item"><b>Status</b><div>${p.active ? '<span class="badge green">active</span>' : '<span class="badge red">disabled</span>'}</div></div>
       <div class="list-item"><b>Service Host</b><div>${escapeHtml(p.service_host || '')}</div></div>
-      <div class="list-item"><b>IMAP / SMTP</b><div>IMAP ${escapeHtml(String(p.imap_port || 993))} · SMTP Submission ${escapeHtml(String(p.smtp_submission_port || 587))}</div></div>
+      <div class="list-item"><b>IMAP / SMTP</b><div>IMAP SSL ${escapeHtml(String(p.imap_ssl_port || 993))} · SMTP TLS ${escapeHtml(String(p.smtp_tls_port || 587))} · SMTP SSL ${escapeHtml(String(p.smtp_ssl_port || 465))}</div></div>
       <div class="list-item"><b>Aliases</b><div>${escapeHtml(String(p.alias_count ?? 0))}</div></div>
     </div>`;
 }
@@ -67,30 +75,30 @@ function renderInbox(items){
     host.innerHTML = '<div class="muted">暂无邮件</div>';
     return;
   }
-  host.innerHTML = items.map(item=>`<button class="mail-item" data-seq="${item.sequence}">
+  host.innerHTML = items.map(item=>`<button class="mail-item" data-uid="${item.uid}">
     <div class="mail-item-subject">${escapeHtml(item.subject || '(无主题)')}</div>
     <div class="mail-item-meta">${escapeHtml(item.from || '')}</div>
     <div class="mail-item-preview">${escapeHtml(item.preview || '')}</div>
   </button>`).join('');
-  host.querySelectorAll('[data-seq]').forEach(el=>{
-    el.onclick = ()=> loadMessage(el.dataset.seq);
+  host.querySelectorAll('[data-uid]').forEach(el=>{
+    el.onclick = ()=> loadMessage(el.dataset.uid);
   });
 }
 async function loadInbox(){
   hideBox('#portalMailMsg');
-  if(!mailPassword){
-    showBox('#portalMailMsg','error','请先输入邮箱密码并连接');
+  if(!webmailToken){
+    showBox('#portalMailMsg','error','请先登录获取 Webmail Token');
     return;
   }
   try{
-    const data = await api(portalPath('webmail/inbox?limit=20'), {headers: mailHeaders()});
+    const data = await api(portalPath('webmail/inbox?limit=20'), {headers: authHeaders()});
     renderInbox(data.items || []);
   }catch(e){ showBox('#portalMailMsg','error',e.message); }
 }
 async function loadMessage(seq){
   hideBox('#portalMailMsg');
   try{
-    const data = await api(portalPath(`webmail/messages/${encodeURIComponent(seq)}`), {headers: mailHeaders()});
+    const data = await api(portalPath(`webmail/messages/${encodeURIComponent(seq)}`), {headers: authHeaders()});
     const m = data.item || {};
     qs('#portalMailViewer').classList.remove('muted');
     qs('#portalMailViewer').innerHTML = `
@@ -108,33 +116,36 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   qs('#portalBtnLogin').onclick = async ()=>{
     hideBox('#portalLoginMsg');
     try{
-      mailPassword = qs('#portalPassword').value;
-      qs('#portalMailPassword').value = mailPassword;
-      await api(portalPath('auth/login'), {method:'POST', body:JSON.stringify({email:qs('#portalEmail').value.trim(), password:mailPassword})});
+      const password = qs('#portalPassword').value;
+      const resp = await api(portalPath('auth/login'), {method:'POST', headers: authHeaders(), body:JSON.stringify({email:qs('#portalEmail').value.trim(), password})});
+      webmailToken = resp.webmail_token || '';
       await refreshPortalSession();
     }catch(e){ showBox('#portalLoginMsg','error',e.message); }
   };
   qs('#portalBtnLogout').onclick = async ()=> {
-    await api(portalPath('auth/logout'), {method:'POST'}).catch(()=>{});
+    await api(portalPath('auth/logout'), {method:'POST', headers: authHeaders()}).catch(()=>{});
     location.reload();
   };
   qs('#portalBtnReload').onclick = refreshPortalSession;
   qs('#portalBtnMailConnect').onclick = async ()=>{
     hideBox('#portalMailMsg');
-    mailPassword = qs('#portalMailPassword').value;
+    if(!webmailToken){
+      showBox('#portalMailMsg','error','请先登录');
+      return;
+    }
     await loadInbox();
-    if(mailPassword) showBox('#portalMailMsg','success','邮箱连接成功');
+    showBox('#portalMailMsg','success','邮箱连接成功');
   };
   qs('#portalBtnInbox').onclick = loadInbox;
   qs('#portalBtnSendMail').onclick = async ()=>{
     hideBox('#portalComposeMsg');
     try{
-      if(!mailPassword){
-        throw new Error('请先连接邮箱');
+      if(!webmailToken){
+        throw new Error('请先登录获取 token');
       }
       await api(portalPath('webmail/send'), {
         method:'POST',
-        headers: mailHeaders(),
+        headers: authHeaders(),
         body: JSON.stringify({
           to: qs('#portalComposeTo').value.trim(),
           subject: qs('#portalComposeSubject').value.trim(),
@@ -149,7 +160,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   qs('#portalBtnPassword').onclick = async ()=>{
     hideBox('#portalPwdMsg');
     try{
-      await api(portalPath('account/password'), {method:'POST', body:JSON.stringify({
+      await api(portalPath('account/password'), {method:'POST', headers: authHeaders(), body:JSON.stringify({
         current_password: qs('#portalCurrentPassword').value,
         new_password: qs('#portalNewPassword').value
       })});
