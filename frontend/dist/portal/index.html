@@ -34,6 +34,48 @@
         <div id="portalProfileCard" class="card"></div>
 
         <hr/>
+        <div class="card webmail-card">
+          <h3>Webmail</h3>
+          <div class="smalltext" style="margin-bottom:10px">首次进入请输入邮箱密码，用于连接 IMAP/SMTP。仅保存在当前页面内存中。</div>
+          <div class="form-row">
+            <div class="span-4"><input id="portalMailPassword" type="password" placeholder="邮箱密码"></div>
+            <div class="span-2"><button id="portalBtnMailConnect" class="secondary">连接邮箱</button></div>
+            <div class="span-2"><button id="portalBtnInbox" class="ghost">刷新收件箱</button></div>
+          </div>
+          <div id="portalMailMsg" class="hidden" style="margin-top:10px"></div>
+
+          <div class="grid" style="margin-top:12px">
+            <div class="col-6">
+              <div class="card webmail-pane">
+                <div class="toolbar" style="margin-bottom:8px">
+                  <b>收件箱</b>
+                  <div class="grow"></div>
+                  <span class="smalltext">最近 20 封</span>
+                </div>
+                <div id="portalInboxList" class="mail-list"></div>
+              </div>
+            </div>
+            <div class="col-6">
+              <div class="card webmail-pane">
+                <b>邮件正文</b>
+                <div id="portalMailViewer" class="mail-viewer muted" style="margin-top:8px">请选择左侧邮件</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card webmail-pane" style="margin-top:12px">
+            <h3>写邮件</h3>
+            <div class="form-row">
+              <div><input id="portalComposeTo" placeholder="收件人，多个用逗号分隔"></div>
+              <div><input id="portalComposeSubject" placeholder="主题"></div>
+              <div><textarea id="portalComposeBody" placeholder="邮件正文"></textarea></div>
+              <div><button id="portalBtnSendMail">发送邮件</button></div>
+            </div>
+            <div id="portalComposeMsg" class="hidden"></div>
+          </div>
+        </div>
+
+        <hr/>
         <div class="grid">
           <div class="col-6">
             <div class="card">
@@ -54,7 +96,6 @@
           </div>
         </div>
       </div>
-      <div class="smalltext" style="margin-top:14px">收发邮件请继续使用你的 IMAP/SMTP 客户端或 Webmail；这里是控制台门户，不替代完整收件箱。</div>
     </div>
   </div>
   <script src="/assets/portal.js"></script>

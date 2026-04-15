@@ -12,6 +12,7 @@ function hideBox(id){ const el=qs(id); if(el) el.classList.add('hidden'); }
 function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
 
 let currentWorkspace = 'default';
+let mailPassword = '';
 async function loadTenantOptions(){
   const data = await api('/api/v1/tenants');
   const items = data.items || [];
@@ -22,6 +23,9 @@ async function loadTenantOptions(){
   sel.onchange = ()=> currentWorkspace = sel.value;
 }
 function portalPath(suffix){ return `/api/v1/tenants/${encodeURIComponent(currentWorkspace)}/mail/${suffix}`; }
+function mailHeaders(){
+  return mailPassword ? {'X-Mail-Password': mailPassword} : {};
+}
 
 async function refreshPortalSession(){
   try{
@@ -30,6 +34,7 @@ async function refreshPortalSession(){
     qs('#portalApp').classList.remove('hidden');
     qs('#portalSessionBadge').textContent = `${data.email || data.subject || 'session'} · ${data.workspace || currentWorkspace}`;
     await Promise.all([loadProfile(), loadAliases()]);
+    if(mailPassword){ await loadInbox(); }
   }catch(e){
     qs('#portalLoginBox').classList.remove('hidden');
     qs('#portalApp').classList.add('hidden');
@@ -56,12 +61,56 @@ async function loadAliases(){
   const items = data.items || [];
   host.innerHTML = items.length ? items.map(x => `<div class="list-item"><div><b>${escapeHtml(x.source || '')}</b></div><div class="smalltext">→ ${escapeHtml(x.destination || '')}</div></div>`).join('') : '<div class="muted">暂无别名</div>';
 }
+function renderInbox(items){
+  const host = qs('#portalInboxList');
+  if(!items.length){
+    host.innerHTML = '<div class="muted">暂无邮件</div>';
+    return;
+  }
+  host.innerHTML = items.map(item=>`<button class="mail-item" data-seq="${item.sequence}">
+    <div class="mail-item-subject">${escapeHtml(item.subject || '(无主题)')}</div>
+    <div class="mail-item-meta">${escapeHtml(item.from || '')}</div>
+    <div class="mail-item-preview">${escapeHtml(item.preview || '')}</div>
+  </button>`).join('');
+  host.querySelectorAll('[data-seq]').forEach(el=>{
+    el.onclick = ()=> loadMessage(el.dataset.seq);
+  });
+}
+async function loadInbox(){
+  hideBox('#portalMailMsg');
+  if(!mailPassword){
+    showBox('#portalMailMsg','error','请先输入邮箱密码并连接');
+    return;
+  }
+  try{
+    const data = await api(portalPath('webmail/inbox?limit=20'), {headers: mailHeaders()});
+    renderInbox(data.items || []);
+  }catch(e){ showBox('#portalMailMsg','error',e.message); }
+}
+async function loadMessage(seq){
+  hideBox('#portalMailMsg');
+  try{
+    const data = await api(portalPath(`webmail/messages/${encodeURIComponent(seq)}`), {headers: mailHeaders()});
+    const m = data.item || {};
+    qs('#portalMailViewer').classList.remove('muted');
+    qs('#portalMailViewer').innerHTML = `
+      <div class="mail-viewer-meta"><b>${escapeHtml(m.subject || '(无主题)')}</b></div>
+      <div class="mail-viewer-meta">From: ${escapeHtml(m.from || '')}</div>
+      <div class="mail-viewer-meta">Date: ${escapeHtml(m.date || '')}</div>
+      <hr/>
+      <pre class="mail-body">${escapeHtml(m.body || '')}</pre>
+    `;
+  }catch(e){ showBox('#portalMailMsg','error',e.message); }
+}
+
 document.addEventListener('DOMContentLoaded', async ()=>{
   try { await loadTenantOptions(); } catch(e) { showBox('#portalLoginMsg','error',e.message); }
   qs('#portalBtnLogin').onclick = async ()=>{
     hideBox('#portalLoginMsg');
     try{
-      await api(portalPath('auth/login'), {method:'POST', body:JSON.stringify({email:qs('#portalEmail').value.trim(), password:qs('#portalPassword').value})});
+      mailPassword = qs('#portalPassword').value;
+      qs('#portalMailPassword').value = mailPassword;
+      await api(portalPath('auth/login'), {method:'POST', body:JSON.stringify({email:qs('#portalEmail').value.trim(), password:mailPassword})});
       await refreshPortalSession();
     }catch(e){ showBox('#portalLoginMsg','error',e.message); }
   };
@@ -70,6 +119,33 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     location.reload();
   };
   qs('#portalBtnReload').onclick = refreshPortalSession;
+  qs('#portalBtnMailConnect').onclick = async ()=>{
+    hideBox('#portalMailMsg');
+    mailPassword = qs('#portalMailPassword').value;
+    await loadInbox();
+    if(mailPassword) showBox('#portalMailMsg','success','邮箱连接成功');
+  };
+  qs('#portalBtnInbox').onclick = loadInbox;
+  qs('#portalBtnSendMail').onclick = async ()=>{
+    hideBox('#portalComposeMsg');
+    try{
+      if(!mailPassword){
+        throw new Error('请先连接邮箱');
+      }
+      await api(portalPath('webmail/send'), {
+        method:'POST',
+        headers: mailHeaders(),
+        body: JSON.stringify({
+          to: qs('#portalComposeTo').value.trim(),
+          subject: qs('#portalComposeSubject').value.trim(),
+          body: qs('#portalComposeBody').value
+        })
+      });
+      qs('#portalComposeSubject').value = '';
+      qs('#portalComposeBody').value = '';
+      showBox('#portalComposeMsg','success','发送成功');
+    }catch(e){ showBox('#portalComposeMsg','error',e.message); }
+  };
   qs('#portalBtnPassword').onclick = async ()=>{
     hideBox('#portalPwdMsg');
     try{
