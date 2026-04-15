@@ -24,7 +24,7 @@ async function loadTenantOptions(){
 }
 function portalPath(suffix){ return `/api/v1/tenants/${encodeURIComponent(currentWorkspace)}/mail/${suffix}`; }
 function csrfToken(){
-  const pair = document.cookie.split('; ').find(v=>v.startsWith('mailadmin_csrf_'));
+  const pair = document.cookie.split('; ').find(v=>v.startsWith('mailadmin_csrf_portal='));
   return pair ? decodeURIComponent(pair.split('=').slice(1).join('=')) : '';
 }
 function authHeaders(){
@@ -42,7 +42,11 @@ async function refreshPortalSession(){
     qs('#portalApp').classList.remove('hidden');
     qs('#portalSessionBadge').textContent = `${data.email || data.subject || 'session'} · ${data.workspace || currentWorkspace}`;
     await Promise.all([loadProfile(), loadAliases()]);
-    if(webmailToken){ await loadInbox(); }
+    if(webmailToken){
+      await loadInbox();
+    }else{
+      showBox('#portalMailMsg','error','请点击“连接邮箱”获取短期 Webmail Token');
+    }
   }catch(e){
     qs('#portalLoginBox').classList.remove('hidden');
     qs('#portalApp').classList.add('hidden');
@@ -87,7 +91,7 @@ function renderInbox(items){
 async function loadInbox(){
   hideBox('#portalMailMsg');
   if(!webmailToken){
-    showBox('#portalMailMsg','error','请先登录获取 Webmail Token');
+    showBox('#portalMailMsg','error','请先连接邮箱获取 Webmail Token');
     return;
   }
   try{
@@ -117,8 +121,8 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     hideBox('#portalLoginMsg');
     try{
       const password = qs('#portalPassword').value;
-      const resp = await api(portalPath('auth/login'), {method:'POST', headers: authHeaders(), body:JSON.stringify({email:qs('#portalEmail').value.trim(), password})});
-      webmailToken = resp.webmail_token || '';
+      await api(portalPath('auth/login'), {method:'POST', headers: authHeaders(), body:JSON.stringify({email:qs('#portalEmail').value.trim(), password})});
+      webmailToken = '';
       await refreshPortalSession();
     }catch(e){ showBox('#portalLoginMsg','error',e.message); }
   };
@@ -129,19 +133,26 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   qs('#portalBtnReload').onclick = refreshPortalSession;
   qs('#portalBtnMailConnect').onclick = async ()=>{
     hideBox('#portalMailMsg');
-    if(!webmailToken){
-      showBox('#portalMailMsg','error','请先登录');
-      return;
+    try{
+      const password = prompt('请输入当前邮箱密码以连接 Webmail（15 分钟有效）');
+      if(!password){
+        showBox('#portalMailMsg','error','已取消连接');
+        return;
+      }
+      const resp = await api(portalPath('webmail/connect'), {method:'POST', headers: authHeaders(), body:JSON.stringify({password})});
+      webmailToken = resp.webmail_token || '';
+      await loadInbox();
+      showBox('#portalMailMsg','success','邮箱连接成功');
+    }catch(e){
+      showBox('#portalMailMsg','error',e.message);
     }
-    await loadInbox();
-    showBox('#portalMailMsg','success','邮箱连接成功');
   };
   qs('#portalBtnInbox').onclick = loadInbox;
   qs('#portalBtnSendMail').onclick = async ()=>{
     hideBox('#portalComposeMsg');
     try{
       if(!webmailToken){
-        throw new Error('请先登录获取 token');
+        throw new Error('请先连接邮箱获取 token');
       }
       await api(portalPath('webmail/send'), {
         method:'POST',

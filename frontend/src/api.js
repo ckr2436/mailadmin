@@ -1,10 +1,11 @@
-function csrfToken() {
-  const name = document.cookie.split('; ').find((v) => v.startsWith('mailadmin_csrf_'))
+function csrfToken(cookieName) {
+  if (!cookieName) return ''
+  const name = document.cookie.split('; ').find((v) => v.startsWith(`${cookieName}=`))
   return name ? decodeURIComponent(name.split('=').slice(1).join('=')) : ''
 }
 
-export async function api(path, opts = {}) {
-  const token = csrfToken()
+export async function api(path, opts = {}, csrfCookieName = '') {
+  const token = csrfToken(csrfCookieName)
   const res = await fetch(path, {
     credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...(token ? { 'X-CSRF-Token': token } : {}), ...(opts.headers || {}) },
