@@ -1132,7 +1132,10 @@ type imapConn struct {
 	tag  int
 }
 
-var literalRe = regexp.MustCompile(`\{(\d+)\}\r\n$`)
+var (
+	literalLineRe  = regexp.MustCompile(`\{(\d+)\}\r\n$`)
+	literalBlockRe = regexp.MustCompile(`\{(\d+)\}\r\n`)
+)
 
 func newIMAPConn(ctx context.Context, host string, port int) (*imapConn, error) {
 	d := &net.Dialer{Timeout: 8 * time.Second}
@@ -1182,7 +1185,7 @@ func (c *imapConn) run(command string) (string, error) {
 			return "", err
 		}
 		out.WriteString(line)
-		if m := literalRe.FindStringSubmatch(line); m != nil {
+		if m := literalLineRe.FindStringSubmatch(line); m != nil {
 			n, _ := strconv.Atoi(m[1])
 			if n > 0 {
 				buf := make([]byte, n)
@@ -1206,7 +1209,7 @@ func extractLiterals(raw string) [][]byte {
 	out := [][]byte{}
 	rest := raw
 	for {
-		loc := literalRe.FindStringSubmatchIndex(rest)
+		loc := literalBlockRe.FindStringSubmatchIndex(rest)
 		if loc == nil {
 			break
 		}
