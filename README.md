@@ -16,7 +16,7 @@
 backend/
   cmd/server/main.go
   bin/mailadmin-api
-  migrations/001_mailadmin_tables.sql
+  migrations/001_mailadmin_tables.sql.disabled
   scripts/init_admin.sh
   .env
 frontend/
@@ -36,10 +36,10 @@ DB_SOCKET=/var/lib/mysql/mysql.sock
 DB_NAME=mailserver
 
 DB_RO_USER=mailro
-DB_RO_PASS=Xtssqkj.168
+DB_RO_PASS=replace-with-db-readonly-password
 
 DB_ADMIN_USER=mailadmin
-DB_ADMIN_PASS=Ci2436.93
+DB_ADMIN_PASS=replace-with-db-admin-password
 
 DEFAULT_DOMAIN=myupona.com
 MAIL_HOST=mail.myupona.com
@@ -101,9 +101,9 @@ MAIL_HOST=mail.myupona.com
 
 ## 首次部署
 
-### 1. 创建控制台元数据表
+### 1. 启动 API（自动初始化元数据表）
 ```bash
-mysql --protocol=socket -S /var/lib/mysql/mysql.sock -u mailadmin -p mailserver < /opt/apps/mailops/backend/migrations/001_mailadmin_tables.sql
+# 启动 API 后会自动 ensureMetaTables() 完成初始化，不再需要手动执行 SQL 迁移
 ```
 
 ### 2. 初始化 superadmin
@@ -152,7 +152,7 @@ npm run build
 ## 生产建议
 
 1. 这套代码是 **生产导向基线**，不是审计完成的商业成品，正式公网暴露前建议再做一次自测与权限回归。
-2. `.env` 和 `deploy/systemd/mailadmin.env` 当前已写入真实数据库密码，请立即限制文件权限：
+2. `.env` 和 `deploy/systemd/mailadmin.env` 只能使用占位符或通过安全系统下发的密钥，不要提交真实密码：
 ```bash
 chmod 600 /opt/apps/mailops/backend/.env
 chmod 600 /opt/apps/mailops/deploy/systemd/mailadmin.env

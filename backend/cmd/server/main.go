@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 	"net/http"
 	"net/mail"
 	"net/smtp"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -25,6 +28,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -59,8 +63,9 @@ type Config struct {
 type Session struct {
 	Subject   string `json:"sub"`
 	Kind      string `json:"kind"`
-	Role      string `json:"role,omitempty"`
 	Workspace string `json:"ws,omitempty"`
+	Version   int64  `json:"ver,omitempty"`
+	Role      string `json:"role,omitempty"`
 	Exp       int64  `json:"exp"`
 }
 
@@ -149,8 +154,26 @@ type AdminUserRow struct {
 }
 
 type Server struct {
-	cfg    Config
-	logger *log.Logger
+	cfg           Config
+	logger        *log.Logger
+	mu            sync.Mutex
+	loginAttempts map[string]loginAttempt
+	webmailTokens map[string]WebmailToken
+}
+
+type loginAttempt struct {
+	Failures    int
+	LastFailure time.Time
+	LockedUntil time.Time
+}
+
+type WebmailToken struct {
+	Token        string
+	Mailbox      string
+	Workspace    string
+	Password     string
+	PasswordHash string
+	ExpiresAt    int64
 }
 
 var (
@@ -187,7 +210,7 @@ func envInt64(key string, fallback int64) int64 {
 func loadConfig() (Config, error) {
 	cfg := Config{
 		AppAddr:                    env("APP_ADDR", "127.0.0.1:18080"),
-		AppTrustProxy:              envBool("APP_TRUST_PROXY", true),
+		AppTrustProxy:              envBool("APP_TRUST_PROXY", false),
 		SessionSecret:              os.Getenv("SESSION_SECRET"),
 		CookieSecure:               envBool("COOKIE_SECURE", true),
 		CookieSameSite:             env("COOKIE_SAMESITE", "Lax"),
@@ -250,6 +273,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 func writeErr(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
+}
+func randomTokenHex(n int) (string, error) {
+	if n <= 0 {
+		n = 32
+	}
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 func readJSON(r *http.Request, dst any) error {
 	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
@@ -341,6 +374,7 @@ func (s *Server) ensureMetaTables(ctx context.Context) error {
   password_hash VARCHAR(255) NOT NULL,
   role VARCHAR(32) NOT NULL DEFAULT 'superadmin',
   is_active TINYINT(1) NOT NULL DEFAULT 1,
+  session_version BIGINT NOT NULL DEFAULT 1,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
@@ -404,6 +438,9 @@ ON DUPLICATE KEY UPDATE workspace_id=VALUES(workspace_id);`, s.cfg.AdminTable, s
 		if err := s.ensureColumn(ctx, s.cfg.AdminWorkspaceBindingTable, col, "TINYINT(1) NOT NULL DEFAULT 1"); err != nil {
 			return err
 		}
+	}
+	if err := s.ensureColumn(ctx, s.cfg.AdminTable, "session_version", "BIGINT NOT NULL DEFAULT 1"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -473,6 +510,89 @@ func (s *Server) setCookie(w http.ResponseWriter, name string, sess Session) err
 func (s *Server) clearCookie(w http.ResponseWriter, name string) {
 	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", Domain: s.cfg.CookieDomain, HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: s.sameSite(), MaxAge: -1, Expires: time.Unix(0, 0)})
 }
+func (s *Server) csrfCookieName(kind string) string {
+	return "mailadmin_csrf_" + kind
+}
+func (s *Server) setCSRFCookie(w http.ResponseWriter, kind string) (string, error) {
+	token, err := randomTokenHex(24)
+	if err != nil {
+		return "", err
+	}
+	http.SetCookie(w, &http.Cookie{Name: s.csrfCookieName(kind), Value: token, Path: "/", Domain: s.cfg.CookieDomain, HttpOnly: false, Secure: s.cfg.CookieSecure, SameSite: s.sameSite(), MaxAge: int(s.cfg.SessionTTLSeconds)})
+	return token, nil
+}
+func (s *Server) clearCSRFCookie(w http.ResponseWriter, kind string) {
+	http.SetCookie(w, &http.Cookie{Name: s.csrfCookieName(kind), Value: "", Path: "/", Domain: s.cfg.CookieDomain, HttpOnly: false, Secure: s.cfg.CookieSecure, SameSite: s.sameSite(), MaxAge: -1, Expires: time.Unix(0, 0)})
+}
+func requiresCSRF(r *http.Request) bool {
+	return !(r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions)
+}
+func sameHost(origin, host string) bool {
+	if origin == "" {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Host, host)
+}
+func (s *Server) validateOriginAndCSRF(w http.ResponseWriter, r *http.Request, kind string) bool {
+	if !requiresCSRF(r) {
+		return true
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" || !sameHost(origin, r.Host) {
+		writeErr(w, 403, "CSRF_INVALID_ORIGIN", "Invalid request origin")
+		return false
+	}
+	c, err := r.Cookie(s.csrfCookieName(kind))
+	if err != nil || strings.TrimSpace(c.Value) == "" {
+		writeErr(w, 403, "CSRF_MISSING", "Missing CSRF cookie")
+		return false
+	}
+	headerToken := strings.TrimSpace(r.Header.Get("X-CSRF-Token"))
+	if headerToken == "" || !hmac.Equal([]byte(headerToken), []byte(c.Value)) {
+		writeErr(w, 403, "CSRF_INVALID", "Invalid CSRF token")
+		return false
+	}
+	return true
+}
+func (s *Server) checkLoginRateLimit(key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	at := s.loginAttempts[key]
+	if !at.LockedUntil.IsZero() && at.LockedUntil.After(now) {
+		sec := int(at.LockedUntil.Sub(now).Seconds())
+		if sec < 1 {
+			sec = 1
+		}
+		return fmt.Errorf("too many failed attempts, retry in %d seconds", sec)
+	}
+	return nil
+}
+func (s *Server) registerLoginFailure(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	at := s.loginAttempts[key]
+	if at.LastFailure.IsZero() || now.Sub(at.LastFailure) > 15*time.Minute {
+		at.Failures = 0
+	}
+	at.Failures++
+	at.LastFailure = now
+	if at.Failures >= 5 {
+		lockSeconds := min(300, (at.Failures-4)*30)
+		at.LockedUntil = now.Add(time.Duration(lockSeconds) * time.Second)
+	}
+	s.loginAttempts[key] = at
+}
+func (s *Server) clearLoginFailure(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.loginAttempts, key)
+}
 func (s *Server) getSession(r *http.Request, name, kind string) (*Session, error) {
 	c, err := r.Cookie(name)
 	if err != nil {
@@ -493,12 +613,23 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) *Session {
 		writeErr(w, 401, "UNAUTHORIZED", "Admin login required")
 		return nil
 	}
-	return sess
+	if !s.validateOriginAndCSRF(w, r, "admin") {
+		return nil
+	}
+	enriched, err := s.adminAuthState(r.Context(), sess)
+	if err != nil {
+		writeErr(w, 401, "UNAUTHORIZED", "Session expired, please login again")
+		return nil
+	}
+	return enriched
 }
 func (s *Server) requirePortal(w http.ResponseWriter, r *http.Request) *Session {
 	sess, err := s.getSession(r, s.cfg.PortalCookieName, "portal")
 	if err != nil {
 		writeErr(w, 401, "UNAUTHORIZED", "Mailbox login required")
+		return nil
+	}
+	if !s.validateOriginAndCSRF(w, r, "portal") {
 		return nil
 	}
 	return sess
@@ -515,19 +646,23 @@ func (s *Server) domainID(ctx context.Context, domain string) (int64, error) {
 	}
 	return strconv.ParseInt(strings.TrimSpace(out), 10, 64)
 }
-func (s *Server) adminLookup(ctx context.Context, username string) (hash, role string, active bool, found bool, err error) {
-	out, err := s.execSQL(ctx, "ro", fmt.Sprintf("SELECT password_hash,role,is_active FROM %s WHERE username=%s LIMIT 1;", s.cfg.AdminTable, s.sqlQuote(username)))
+func (s *Server) adminLookup(ctx context.Context, username string) (hash, role string, active bool, version int64, found bool, err error) {
+	out, err := s.execSQL(ctx, "ro", fmt.Sprintf("SELECT password_hash,role,is_active,COALESCE(session_version,1) FROM %s WHERE username=%s LIMIT 1;", s.cfg.AdminTable, s.sqlQuote(username)))
 	if err != nil {
 		return
 	}
 	if strings.TrimSpace(out) == "" {
-		return "", "", false, false, nil
+		return "", "", false, 0, false, nil
 	}
 	cols := strings.Split(out, "\t")
-	if len(cols) < 3 {
-		return "", "", false, false, fmt.Errorf("unexpected admin row")
+	if len(cols) < 4 {
+		return "", "", false, 0, false, fmt.Errorf("unexpected admin row")
 	}
-	return cols[0], cols[1], strings.TrimSpace(cols[2]) == "1", true, nil
+	ver, _ := strconv.ParseInt(strings.TrimSpace(cols[3]), 10, 64)
+	if ver <= 0 {
+		ver = 1
+	}
+	return cols[0], cols[1], strings.TrimSpace(cols[2]) == "1", ver, true, nil
 }
 func (s *Server) adminIDByUsername(ctx context.Context, username string) (int64, error) {
 	out, err := s.execSQL(ctx, "ro", fmt.Sprintf("SELECT id FROM %s WHERE username=%s LIMIT 1;", s.cfg.AdminTable, s.sqlQuote(username)))
@@ -541,6 +676,24 @@ func (s *Server) adminIDByUsername(ctx context.Context, username string) (int64,
 }
 func (s *Server) isSuperadmin(sess *Session) bool {
 	return sess != nil && strings.EqualFold(sess.Role, "superadmin")
+}
+func (s *Server) adminAuthState(ctx context.Context, sess *Session) (*Session, error) {
+	if sess == nil || strings.TrimSpace(sess.Subject) == "" {
+		return nil, errors.New("missing admin session")
+	}
+	_, role, active, version, found, err := s.adminLookup(ctx, sess.Subject)
+	if err != nil {
+		return nil, err
+	}
+	if !found || !active {
+		return nil, errors.New("admin disabled")
+	}
+	if sess.Version != version {
+		return nil, errors.New("session invalidated")
+	}
+	enriched := *sess
+	enriched.Role = role
+	return &enriched, nil
 }
 func (s *Server) adminWorkspaceBindings(ctx context.Context, username string) ([]BindingPermission, error) {
 	if username == "" {
@@ -1262,21 +1415,60 @@ func normalizePreview(raw string, limit int) string {
 	return joined
 }
 
-func (s *Server) portalMailboxAuth(ctx context.Context, mailboxEmail, password string) error {
-	if strings.TrimSpace(password) == "" {
-		return fmt.Errorf("mail password is required")
-	}
-	hash, active, found, err := s.mailboxLookup(ctx, mailboxEmail)
+func (s *Server) issueWebmailToken(mailboxEmail, workspace, password, passwordHash string) (string, error) {
+	token, err := randomTokenHex(32)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if !found || !active {
-		return fmt.Errorf("mailbox is unavailable")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.webmailTokens == nil {
+		s.webmailTokens = map[string]WebmailToken{}
 	}
-	if err := s.verifyHash(ctx, hash, password); err != nil {
-		return fmt.Errorf("invalid mail credentials")
+	s.webmailTokens[token] = WebmailToken{
+		Token: token, Mailbox: mailboxEmail, Workspace: workspace, Password: password, PasswordHash: passwordHash,
+		ExpiresAt: time.Now().Add(15 * time.Minute).Unix(),
 	}
-	return nil
+	return token, nil
+}
+func (s *Server) revokeWebmailTokensForMailbox(mailbox string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, v := range s.webmailTokens {
+		if mailbox == "" || strings.EqualFold(v.Mailbox, mailbox) {
+			delete(s.webmailTokens, k)
+		}
+	}
+}
+func (s *Server) resolveWebmailToken(ctx context.Context, sess *Session, token string) (WebmailToken, error) {
+	if strings.TrimSpace(token) == "" {
+		return WebmailToken{}, fmt.Errorf("missing webmail token")
+	}
+	s.mu.Lock()
+	ws, ok := s.webmailTokens[token]
+	s.mu.Unlock()
+	if !ok || ws.ExpiresAt < time.Now().Unix() {
+		return WebmailToken{}, fmt.Errorf("webmail token expired")
+	}
+	if !strings.EqualFold(ws.Mailbox, sess.Subject) || ws.Workspace != sess.Workspace {
+		return WebmailToken{}, fmt.Errorf("invalid webmail token")
+	}
+	hash, active, found, err := s.mailboxLookup(ctx, sess.Subject)
+	if err != nil {
+		return WebmailToken{}, err
+	}
+	if !found || !active || hash != ws.PasswordHash {
+		s.revokeWebmailTokensForMailbox(sess.Subject)
+		return WebmailToken{}, fmt.Errorf("mailbox session invalid")
+	}
+	return ws, nil
+}
+func bearerToken(r *http.Request) string {
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		return strings.TrimSpace(auth[7:])
+	}
+	return ""
 }
 
 func (s *Server) portalInbox(ctx context.Context, mailboxEmail, password string, limit int) ([]WebmailMessage, error) {
@@ -1295,7 +1487,7 @@ func (s *Server) portalInbox(ctx context.Context, mailboxEmail, password string,
 	if _, err := c.run("SELECT INBOX"); err != nil {
 		return nil, err
 	}
-	searchRaw, err := c.run("SEARCH ALL")
+	searchRaw, err := c.run("UID SEARCH ALL")
 	if err != nil {
 		return nil, err
 	}
@@ -1326,7 +1518,7 @@ func (s *Server) portalInbox(ctx context.Context, mailboxEmail, password string,
 	}
 	items := make([]WebmailMessage, 0, len(selected))
 	for _, seq := range selected {
-		raw, fetchErr := c.run(fmt.Sprintf("FETCH %d (UID RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)] BODY.PEEK[TEXT])", seq))
+		raw, fetchErr := c.run(fmt.Sprintf("UID FETCH %d (UID RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)] BODY.PEEK[TEXT])", seq))
 		if fetchErr != nil {
 			continue
 		}
@@ -1348,13 +1540,13 @@ func (s *Server) portalInbox(ctx context.Context, mailboxEmail, password string,
 			size, _ = strconv.ParseInt(m[1], 10, 64)
 		}
 		items = append(items, WebmailMessage{
-			Sequence: seq, UID: uid, From: headers["from"], To: headers["to"], Subject: headers["subject"], Date: headers["date"], Size: size, Preview: preview,
+			UID: uid, From: headers["from"], To: headers["to"], Subject: headers["subject"], Date: headers["date"], Size: size, Preview: preview,
 		})
 	}
 	return items, nil
 }
 
-func (s *Server) portalMessage(ctx context.Context, mailboxEmail, password string, seq int) (map[string]any, error) {
+func (s *Server) portalMessage(ctx context.Context, mailboxEmail, password, uid string) (map[string]any, error) {
 	c, err := newIMAPConn(ctx, s.cfg.MailHost, 993)
 	if err != nil {
 		return nil, err
@@ -1367,7 +1559,7 @@ func (s *Server) portalMessage(ctx context.Context, mailboxEmail, password strin
 	if _, err := c.run("SELECT INBOX"); err != nil {
 		return nil, err
 	}
-	raw, err := c.run(fmt.Sprintf("FETCH %d (UID RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)] BODY.PEEK[TEXT])", seq))
+	raw, err := c.run(fmt.Sprintf("UID FETCH %s (UID RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)] BODY.PEEK[TEXT])", strings.TrimSpace(uid)))
 	if err != nil {
 		return nil, err
 	}
@@ -1380,16 +1572,16 @@ func (s *Server) portalMessage(ctx context.Context, mailboxEmail, password strin
 	if len(literals) > 1 {
 		body = string(literals[1])
 	}
-	uid := ""
+	parsedUID := strings.TrimSpace(uid)
 	if m := regexp.MustCompile(`UID\s+([0-9]+)`).FindStringSubmatch(raw); len(m) > 1 {
-		uid = m[1]
+		parsedUID = m[1]
 	}
 	size := int64(0)
 	if m := regexp.MustCompile(`RFC822\.SIZE\s+([0-9]+)`).FindStringSubmatch(raw); len(m) > 1 {
 		size, _ = strconv.ParseInt(m[1], 10, 64)
 	}
 	return map[string]any{
-		"sequence": seq, "uid": uid, "from": headers["from"], "to": headers["to"], "subject": headers["subject"], "date": headers["date"], "size": size, "body": body,
+		"uid": parsedUID, "from": headers["from"], "to": headers["to"], "subject": headers["subject"], "date": headers["date"], "size": size, "body": body,
 	}, nil
 }
 
@@ -1463,16 +1655,24 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "BAD_REQUEST", "Invalid JSON body")
 		return
 	}
-	hash, role, active, found, err := s.adminLookup(r.Context(), req.Username)
+	loginKey := "admin|" + s.clientIP(r) + "|" + strings.ToLower(strings.TrimSpace(req.Username))
+	if err := s.checkLoginRateLimit(loginKey); err != nil {
+		writeErr(w, 429, "RATE_LIMITED", err.Error())
+		return
+	}
+	hash, role, active, version, found, err := s.adminLookup(r.Context(), req.Username)
 	if err != nil {
 		writeErr(w, 500, "DB_ERROR", err.Error())
 		return
 	}
 	if !found || !active || s.verifyHash(r.Context(), hash, req.Password) != nil {
+		s.registerLoginFailure(loginKey)
 		writeErr(w, 401, "AUTH_FAILED", "Invalid credentials")
 		return
 	}
-	_ = s.setCookie(w, s.cfg.AdminCookieName, Session{Subject: req.Username, Kind: "admin", Role: role, Exp: time.Now().Add(time.Duration(s.cfg.SessionTTLSeconds) * time.Second).Unix()})
+	s.clearLoginFailure(loginKey)
+	_ = s.setCookie(w, s.cfg.AdminCookieName, Session{Subject: req.Username, Kind: "admin", Version: version, Exp: time.Now().Add(time.Duration(s.cfg.SessionTTLSeconds) * time.Second).Unix()})
+	_, _ = s.setCSRFCookie(w, "admin")
 	s.audit(r.Context(), "admin", req.Username, "admin.login", s.clientIP(r), `{}`)
 	writeJSON(w, 200, map[string]any{"ok": true, "username": req.Username, "role": role})
 }
@@ -1482,6 +1682,7 @@ func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.clearCookie(w, s.cfg.AdminCookieName)
+	s.clearCSRFCookie(w, "admin")
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 func (s *Server) handleAdminSession(w http.ResponseWriter, r *http.Request) {
@@ -1526,6 +1727,11 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "BAD_REQUEST", "Invalid email")
 		return
 	}
+	loginKey := "portal|" + s.clientIP(r) + "|" + strings.ToLower(strings.TrimSpace(req.Email))
+	if err := s.checkLoginRateLimit(loginKey); err != nil {
+		writeErr(w, 429, "RATE_LIMITED", err.Error())
+		return
+	}
 	workspaceSlug := strings.TrimSpace(r.Header.Get("X-Workspace-Slug"))
 	if workspaceSlug == "" {
 		workspaceSlug = "default"
@@ -1543,19 +1749,27 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !found || !active || s.verifyHash(r.Context(), hash, req.Password) != nil {
+		s.registerLoginFailure(loginKey)
 		writeErr(w, 401, "AUTH_FAILED", "Invalid credentials")
 		return
 	}
+	s.clearLoginFailure(loginKey)
 	_ = s.setCookie(w, s.cfg.PortalCookieName, Session{Subject: req.Email, Kind: "portal", Workspace: workspaceSlug, Exp: time.Now().Add(time.Duration(s.cfg.SessionTTLSeconds) * time.Second).Unix()})
+	_, _ = s.setCSRFCookie(w, "portal")
+	token, _ := s.issueWebmailToken(req.Email, workspaceSlug, req.Password, hash)
 	s.audit(r.Context(), "mailbox", req.Email, "portal.login", s.clientIP(r), `{}`)
-	writeJSON(w, 200, map[string]any{"ok": true, "email": req.Email, "workspace_slug": workspaceSlug})
+	writeJSON(w, 200, map[string]any{"ok": true, "email": req.Email, "workspace_slug": workspaceSlug, "webmail_token": token})
 }
 func (s *Server) handlePortalLogout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, 405, "METHOD_NOT_ALLOWED", "Method not allowed")
 		return
 	}
+	if sess, err := s.getSession(r, s.cfg.PortalCookieName, "portal"); err == nil {
+		s.revokeWebmailTokensForMailbox(sess.Subject)
+	}
 	s.clearCookie(w, s.cfg.PortalCookieName)
+	s.clearCSRFCookie(w, "portal")
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 func (s *Server) handlePortalSession(w http.ResponseWriter, r *http.Request) {
@@ -1645,6 +1859,7 @@ func (s *Server) handlePortalPassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "DB_ERROR", err.Error())
 		return
 	}
+	s.revokeWebmailTokensForMailbox(sess.Subject)
 	s.audit(r.Context(), "mailbox", sess.Subject, "portal.change_password", sess.Subject, `{}`)
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
@@ -1657,8 +1872,8 @@ func (s *Server) handlePortalWebmailInbox(w http.ResponseWriter, r *http.Request
 	if sess == nil {
 		return
 	}
-	password := strings.TrimSpace(r.Header.Get("X-Mail-Password"))
-	if err := s.portalMailboxAuth(r.Context(), sess.Subject, password); err != nil {
+	ws, err := s.resolveWebmailToken(r.Context(), sess, bearerToken(r))
+	if err != nil {
 		writeErr(w, 401, "AUTH_FAILED", err.Error())
 		return
 	}
@@ -1668,7 +1883,7 @@ func (s *Server) handlePortalWebmailInbox(w http.ResponseWriter, r *http.Request
 			limit = n
 		}
 	}
-	items, err := s.portalInbox(r.Context(), sess.Subject, password, limit)
+	items, err := s.portalInbox(r.Context(), sess.Subject, ws.Password, limit)
 	if err != nil {
 		writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
 		return
@@ -1684,8 +1899,8 @@ func (s *Server) handlePortalWebmailMessage(w http.ResponseWriter, r *http.Reque
 	if sess == nil {
 		return
 	}
-	password := strings.TrimSpace(r.Header.Get("X-Mail-Password"))
-	if err := s.portalMailboxAuth(r.Context(), sess.Subject, password); err != nil {
+	ws, err := s.resolveWebmailToken(r.Context(), sess, bearerToken(r))
+	if err != nil {
 		writeErr(w, 401, "AUTH_FAILED", err.Error())
 		return
 	}
@@ -1694,12 +1909,12 @@ func (s *Server) handlePortalWebmailMessage(w http.ResponseWriter, r *http.Reque
 		writeErr(w, 400, "BAD_REQUEST", "missing message id")
 		return
 	}
-	seq, err := strconv.Atoi(parts[0])
-	if err != nil || seq <= 0 {
+	uid := strings.TrimSpace(parts[0])
+	if uid == "" || !regexp.MustCompile(`^[0-9]+$`).MatchString(uid) {
 		writeErr(w, 400, "BAD_REQUEST", "invalid message id")
 		return
 	}
-	msg, err := s.portalMessage(r.Context(), sess.Subject, password, seq)
+	msg, err := s.portalMessage(r.Context(), sess.Subject, ws.Password, uid)
 	if err != nil {
 		writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
 		return
@@ -1715,8 +1930,8 @@ func (s *Server) handlePortalWebmailSend(w http.ResponseWriter, r *http.Request)
 	if sess == nil {
 		return
 	}
-	password := strings.TrimSpace(r.Header.Get("X-Mail-Password"))
-	if err := s.portalMailboxAuth(r.Context(), sess.Subject, password); err != nil {
+	ws, err := s.resolveWebmailToken(r.Context(), sess, bearerToken(r))
+	if err != nil {
 		writeErr(w, 401, "AUTH_FAILED", err.Error())
 		return
 	}
@@ -1737,7 +1952,7 @@ func (s *Server) handlePortalWebmailSend(w http.ResponseWriter, r *http.Request)
 		writeErr(w, 400, "BAD_REQUEST", "Body is required")
 		return
 	}
-	if err := s.portalSendMail(r.Context(), sess.Subject, password, req.To, req.Subject, req.Body); err != nil {
+	if err := s.portalSendMail(r.Context(), sess.Subject, ws.Password, req.To, req.Subject, req.Body); err != nil {
 		writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
 		return
 	}
@@ -1947,7 +2162,7 @@ func (s *Server) upsertAdminUser(ctx context.Context, username, plainPassword, r
 	if isActive {
 		active = 1
 	}
-	existing, _, _, found, err := s.adminLookup(ctx, username)
+	existing, _, _, _, found, err := s.adminLookup(ctx, username)
 	if err != nil {
 		return err
 	}
@@ -1961,7 +2176,7 @@ func (s *Server) upsertAdminUser(ctx context.Context, username, plainPassword, r
 	if !found && hash == "" {
 		return fmt.Errorf("password required for new admin user")
 	}
-	_, err = s.execSQL(ctx, "admin", fmt.Sprintf("INSERT INTO %s(username,password_hash,role,is_active) VALUES(%s,%s,%s,%d) ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), role=VALUES(role), is_active=VALUES(is_active);", s.cfg.AdminTable, s.sqlQuote(username), s.sqlQuote(hash), s.sqlQuote(role), active))
+	_, err = s.execSQL(ctx, "admin", fmt.Sprintf("INSERT INTO %s(username,password_hash,role,is_active,session_version) VALUES(%s,%s,%s,%d,1) ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), role=VALUES(role), is_active=VALUES(is_active), session_version=COALESCE(session_version,1)+1;", s.cfg.AdminTable, s.sqlQuote(username), s.sqlQuote(hash), s.sqlQuote(role), active))
 	return err
 }
 func (s *Server) replaceAdminWorkspaceBindings(ctx context.Context, username string, bindings []BindingPermission) error {
@@ -2058,7 +2273,7 @@ func (s *Server) handleAdminUserItem(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "BAD_REQUEST", "Invalid JSON body")
 			return
 		}
-		_, role, _, found, err := s.adminLookup(r.Context(), username)
+		_, role, _, _, found, err := s.adminLookup(r.Context(), username)
 		if err != nil {
 			writeErr(w, 500, "DB_ERROR", err.Error())
 			return
@@ -2080,7 +2295,7 @@ func (s *Server) handleAdminUserItem(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "BAD_REQUEST", "Password must be at least 8 characters")
 			return
 		}
-		_, role, active, _, err := s.adminLookup(r.Context(), username)
+		_, role, active, _, _, err := s.adminLookup(r.Context(), username)
 		if err != nil {
 			writeErr(w, 500, "DB_ERROR", err.Error())
 			return
@@ -2479,21 +2694,41 @@ func (s *Server) handleSystemAliases(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
-func (s *Server) readMaps() ([]map[string]string, error) {
+func (s *Server) readMaps() ([]map[string]any, error) {
 	pattern := filepath.Join(s.cfg.PostfixCfg, "mysql", "*.cf")
 	files, err := filepath.Glob(pattern)
 	if err != nil {
 		return nil, err
 	}
 	sort.Strings(files)
-	items := []map[string]string{}
+	items := []map[string]any{}
+	required := []string{"user", "password", "hosts", "dbname", "query"}
 	for _, f := range files {
-		b, err := os.ReadFile(f)
-		if err != nil {
-			return nil, err
+		entry := map[string]any{"path": f, "exists": true, "parse_ok": true}
+		b, readErr := os.ReadFile(f)
+		if readErr != nil {
+			entry["parse_ok"] = false
+			entry["error"] = readErr.Error()
+			items = append(items, entry)
+			continue
 		}
-		content := regexp.MustCompile(`(?m)^(password\s*=\s*).*$`).ReplaceAllString(string(b), "${1}<REDACTED>")
-		items = append(items, map[string]string{"path": f, "content": content})
+		cfgMap := map[string]string{}
+		for _, ln := range splitLines(string(b)) {
+			kv := strings.SplitN(ln, "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			cfgMap[strings.TrimSpace(strings.ToLower(kv[0]))] = strings.TrimSpace(kv[1])
+		}
+		missing := []string{}
+		for _, k := range required {
+			if strings.TrimSpace(cfgMap[k]) == "" {
+				missing = append(missing, k)
+			}
+		}
+		entry["required_complete"] = len(missing) == 0
+		entry["missing_required"] = missing
+		items = append(items, entry)
 	}
 	return items, nil
 }
@@ -2504,6 +2739,9 @@ func (s *Server) handleMaps(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodGet {
 		writeErr(w, 405, "METHOD_NOT_ALLOWED", "Method not allowed")
+		return
+	}
+	if !s.ensureSuperadmin(w, sess) {
 		return
 	}
 	items, err := s.readMaps()
@@ -2558,7 +2796,7 @@ func main() {
 	if err != nil {
 		logger.Fatal(err)
 	}
-	srv := &Server{cfg: cfg, logger: logger}
+	srv := &Server{cfg: cfg, logger: logger, loginAttempts: map[string]loginAttempt{}, webmailTokens: map[string]WebmailToken{}}
 	if err := srv.ensureMetaTables(context.Background()); err != nil {
 		logger.Fatalf("ensure meta tables failed: %v", err)
 	}

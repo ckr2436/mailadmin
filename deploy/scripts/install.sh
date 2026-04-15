@@ -7,7 +7,9 @@ SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 mkdir -p "$APP_ROOT"
 rsync -a --delete "$SRC_ROOT/" "$APP_ROOT/"
 
-install -m 600 "$APP_ROOT/backend/.env" "$APP_ROOT/backend/.env"
+if [ ! -f "$APP_ROOT/backend/.env" ]; then
+  install -m 600 "$APP_ROOT/backend/.env.example" "$APP_ROOT/backend/.env"
+fi
 install -m 600 "$APP_ROOT/deploy/systemd/mailadmin.env" "$APP_ROOT/deploy/systemd/mailadmin.env"
 
 if command -v systemctl >/dev/null 2>&1; then
@@ -18,6 +20,6 @@ fi
 
 echo "App copied to $APP_ROOT"
 echo "Next:"
-echo "  1) mysql --protocol=socket -S /var/lib/mysql/mysql.sock -u mailadmin -p mailserver < $APP_ROOT/backend/migrations/001_mailadmin_tables.sql"
-echo "  2) $APP_ROOT/backend/scripts/init_admin.sh <username> <password> superadmin"
-echo "  3) systemctl enable --now mailadmin"
+echo "  1) systemctl enable --now mailadmin"
+echo "  2) API 首次启动将自动 ensureMetaTables() 初始化表结构"
+echo "  3) $APP_ROOT/backend/scripts/init_admin.sh <username> <password> superadmin"
