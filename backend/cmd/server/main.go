@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/mail"
+	"net/smtp"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -92,6 +95,17 @@ type BindingPermission struct {
 	ManageDomains   bool   `json:"manage_domains"`
 	ManageMailboxes bool   `json:"manage_mailboxes"`
 	ManageAliases   bool   `json:"manage_aliases"`
+}
+
+type WebmailMessage struct {
+	Sequence int    `json:"sequence"`
+	UID      string `json:"uid,omitempty"`
+	From     string `json:"from,omitempty"`
+	To       string `json:"to,omitempty"`
+	Subject  string `json:"subject,omitempty"`
+	Date     string `json:"date,omitempty"`
+	Size     int64  `json:"size,omitempty"`
+	Preview  string `json:"preview,omitempty"`
 }
 
 func (p BindingPermission) allows(resource string, write bool) bool {
@@ -1111,6 +1125,325 @@ func trimAnyPrefix(v string, prefixes ...string) string {
 	return v
 }
 
+type imapConn struct {
+	conn net.Conn
+	rd   *bufio.Reader
+	wr   *bufio.Writer
+	tag  int
+}
+
+var (
+	literalLineRe  = regexp.MustCompile(`\{(\d+)\}\r\n$`)
+	literalBlockRe = regexp.MustCompile(`\{(\d+)\}\r\n`)
+)
+
+func newIMAPConn(ctx context.Context, host string, port int) (*imapConn, error) {
+	d := &net.Dialer{Timeout: 8 * time.Second}
+	conn, err := tls.DialWithDialer(d, "tcp", fmt.Sprintf("%s:%d", host, port), &tls.Config{
+		ServerName:         host,
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: false,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(20 * time.Second))
+	}
+	c := &imapConn{conn: conn, rd: bufio.NewReader(conn), wr: bufio.NewWriter(conn)}
+	greet, err := c.rd.ReadString('\n')
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if !strings.Contains(strings.ToUpper(greet), "OK") {
+		_ = conn.Close()
+		return nil, fmt.Errorf("imap greeting failed")
+	}
+	return c, nil
+}
+
+func (c *imapConn) close() {
+	_ = c.conn.Close()
+}
+
+func (c *imapConn) run(command string) (string, error) {
+	c.tag++
+	tag := fmt.Sprintf("A%04d", c.tag)
+	if _, err := c.wr.WriteString(tag + " " + command + "\r\n"); err != nil {
+		return "", err
+	}
+	if err := c.wr.Flush(); err != nil {
+		return "", err
+	}
+	var out bytes.Buffer
+	for {
+		line, err := c.rd.ReadString('\n')
+		if err != nil {
+			return "", err
+		}
+		out.WriteString(line)
+		if m := literalLineRe.FindStringSubmatch(line); m != nil {
+			n, _ := strconv.Atoi(m[1])
+			if n > 0 {
+				buf := make([]byte, n)
+				if _, err := io.ReadFull(c.rd, buf); err != nil {
+					return "", err
+				}
+				out.Write(buf)
+			}
+			continue
+		}
+		if strings.HasPrefix(line, tag+" ") {
+			if !strings.Contains(strings.ToUpper(line), "OK") {
+				return out.String(), fmt.Errorf("imap command failed: %s", strings.TrimSpace(line))
+			}
+			return out.String(), nil
+		}
+	}
+}
+
+func extractLiterals(raw string) [][]byte {
+	out := [][]byte{}
+	rest := raw
+	for {
+		loc := literalBlockRe.FindStringSubmatchIndex(rest)
+		if loc == nil {
+			break
+		}
+		sizeText := rest[loc[2]:loc[3]]
+		n, err := strconv.Atoi(sizeText)
+		if err != nil || n < 0 {
+			break
+		}
+		bodyStart := loc[1]
+		if bodyStart+n > len(rest) {
+			break
+		}
+		out = append(out, []byte(rest[bodyStart:bodyStart+n]))
+		rest = rest[bodyStart+n:]
+	}
+	return out
+}
+
+func parseHeaderBlock(raw []byte) map[string]string {
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return map[string]string{}
+	}
+	return map[string]string{
+		"from":    msg.Header.Get("From"),
+		"to":      msg.Header.Get("To"),
+		"subject": msg.Header.Get("Subject"),
+		"date":    msg.Header.Get("Date"),
+	}
+}
+
+func normalizePreview(raw string, limit int) string {
+	body := strings.ReplaceAll(raw, "\r", "")
+	lines := []string{}
+	for _, line := range strings.Split(body, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" {
+			continue
+		}
+		lines = append(lines, t)
+		if len(strings.Join(lines, " ")) >= limit {
+			break
+		}
+	}
+	joined := strings.Join(lines, " ")
+	r := []rune(joined)
+	if len(r) > limit {
+		return string(r[:limit]) + "…"
+	}
+	return joined
+}
+
+func (s *Server) portalMailboxAuth(ctx context.Context, mailboxEmail, password string) error {
+	if strings.TrimSpace(password) == "" {
+		return fmt.Errorf("mail password is required")
+	}
+	hash, active, found, err := s.mailboxLookup(ctx, mailboxEmail)
+	if err != nil {
+		return err
+	}
+	if !found || !active {
+		return fmt.Errorf("mailbox is unavailable")
+	}
+	if err := s.verifyHash(ctx, hash, password); err != nil {
+		return fmt.Errorf("invalid mail credentials")
+	}
+	return nil
+}
+
+func (s *Server) portalInbox(ctx context.Context, mailboxEmail, password string, limit int) ([]WebmailMessage, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	c, err := newIMAPConn(ctx, s.cfg.MailHost, 993)
+	if err != nil {
+		return nil, err
+	}
+	defer c.close()
+	if _, err := c.run(fmt.Sprintf(`LOGIN %q %q`, mailboxEmail, password)); err != nil {
+		return nil, err
+	}
+	defer c.run("LOGOUT")
+	if _, err := c.run("SELECT INBOX"); err != nil {
+		return nil, err
+	}
+	searchRaw, err := c.run("SEARCH ALL")
+	if err != nil {
+		return nil, err
+	}
+	seqs := []int{}
+	for _, line := range splitLines(strings.ReplaceAll(searchRaw, "\r", "")) {
+		if !strings.HasPrefix(line, "* SEARCH") {
+			continue
+		}
+		parts := strings.Fields(strings.TrimPrefix(line, "* SEARCH"))
+		for _, p := range parts {
+			n, convErr := strconv.Atoi(strings.TrimSpace(p))
+			if convErr == nil && n > 0 {
+				seqs = append(seqs, n)
+			}
+		}
+	}
+	if len(seqs) == 0 {
+		return []WebmailMessage{}, nil
+	}
+	sort.Ints(seqs)
+	start := 0
+	if len(seqs) > limit {
+		start = len(seqs) - limit
+	}
+	selected := seqs[start:]
+	for i, j := 0, len(selected)-1; i < j; i, j = i+1, j-1 {
+		selected[i], selected[j] = selected[j], selected[i]
+	}
+	items := make([]WebmailMessage, 0, len(selected))
+	for _, seq := range selected {
+		raw, fetchErr := c.run(fmt.Sprintf("FETCH %d (UID RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)] BODY.PEEK[TEXT])", seq))
+		if fetchErr != nil {
+			continue
+		}
+		literals := extractLiterals(raw)
+		headers := map[string]string{}
+		preview := ""
+		if len(literals) > 0 {
+			headers = parseHeaderBlock(literals[0])
+		}
+		if len(literals) > 1 {
+			preview = normalizePreview(string(literals[1]), 160)
+		}
+		uid := ""
+		if m := regexp.MustCompile(`UID\s+([0-9]+)`).FindStringSubmatch(raw); len(m) > 1 {
+			uid = m[1]
+		}
+		size := int64(0)
+		if m := regexp.MustCompile(`RFC822\.SIZE\s+([0-9]+)`).FindStringSubmatch(raw); len(m) > 1 {
+			size, _ = strconv.ParseInt(m[1], 10, 64)
+		}
+		items = append(items, WebmailMessage{
+			Sequence: seq, UID: uid, From: headers["from"], To: headers["to"], Subject: headers["subject"], Date: headers["date"], Size: size, Preview: preview,
+		})
+	}
+	return items, nil
+}
+
+func (s *Server) portalMessage(ctx context.Context, mailboxEmail, password string, seq int) (map[string]any, error) {
+	c, err := newIMAPConn(ctx, s.cfg.MailHost, 993)
+	if err != nil {
+		return nil, err
+	}
+	defer c.close()
+	if _, err := c.run(fmt.Sprintf(`LOGIN %q %q`, mailboxEmail, password)); err != nil {
+		return nil, err
+	}
+	defer c.run("LOGOUT")
+	if _, err := c.run("SELECT INBOX"); err != nil {
+		return nil, err
+	}
+	raw, err := c.run(fmt.Sprintf("FETCH %d (UID RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)] BODY.PEEK[TEXT])", seq))
+	if err != nil {
+		return nil, err
+	}
+	literals := extractLiterals(raw)
+	headers := map[string]string{}
+	body := ""
+	if len(literals) > 0 {
+		headers = parseHeaderBlock(literals[0])
+	}
+	if len(literals) > 1 {
+		body = string(literals[1])
+	}
+	uid := ""
+	if m := regexp.MustCompile(`UID\s+([0-9]+)`).FindStringSubmatch(raw); len(m) > 1 {
+		uid = m[1]
+	}
+	size := int64(0)
+	if m := regexp.MustCompile(`RFC822\.SIZE\s+([0-9]+)`).FindStringSubmatch(raw); len(m) > 1 {
+		size, _ = strconv.ParseInt(m[1], 10, 64)
+	}
+	return map[string]any{
+		"sequence": seq, "uid": uid, "from": headers["from"], "to": headers["to"], "subject": headers["subject"], "date": headers["date"], "size": size, "body": body,
+	}, nil
+}
+
+func (s *Server) portalSendMail(ctx context.Context, mailboxEmail, password, to, subject, body string) error {
+	host := s.cfg.MailHost
+	addr := fmt.Sprintf("%s:%d", host, 587)
+	c, err := smtp.Dial(addr)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if err := c.StartTLS(&tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}); err != nil {
+		return err
+	}
+	if err := c.Auth(smtp.PlainAuth("", mailboxEmail, password, host)); err != nil {
+		return err
+	}
+	if err := c.Mail(mailboxEmail); err != nil {
+		return err
+	}
+	rcpts := []string{}
+	for _, p := range strings.Split(to, ",") {
+		t := strings.TrimSpace(p)
+		if t == "" {
+			continue
+		}
+		if !emailRe.MatchString(t) {
+			return fmt.Errorf("invalid recipient: %s", t)
+		}
+		rcpts = append(rcpts, t)
+	}
+	if len(rcpts) == 0 {
+		return fmt.Errorf("recipient is required")
+	}
+	for _, rcpt := range rcpts {
+		if err := c.Rcpt(rcpt); err != nil {
+			return err
+		}
+	}
+	w, err := c.Data()
+	if err != nil {
+		return err
+	}
+	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s\r\n",
+		mailboxEmail, strings.Join(rcpts, ", "), strings.TrimSpace(subject), time.Now().Format(time.RFC1123Z), body)
+	if _, err := io.WriteString(w, msg); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	return c.Quit()
+}
+
 // handlers
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -1315,6 +1648,102 @@ func (s *Server) handlePortalPassword(w http.ResponseWriter, r *http.Request) {
 	s.audit(r.Context(), "mailbox", sess.Subject, "portal.change_password", sess.Subject, `{}`)
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
+func (s *Server) handlePortalWebmailInbox(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, 405, "METHOD_NOT_ALLOWED", "Method not allowed")
+		return
+	}
+	sess := s.requirePortal(w, r)
+	if sess == nil {
+		return
+	}
+	password := strings.TrimSpace(r.Header.Get("X-Mail-Password"))
+	if err := s.portalMailboxAuth(r.Context(), sess.Subject, password); err != nil {
+		writeErr(w, 401, "AUTH_FAILED", err.Error())
+		return
+	}
+	limit := 20
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			limit = n
+		}
+	}
+	items, err := s.portalInbox(r.Context(), sess.Subject, password, limit)
+	if err != nil {
+		writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "items": items})
+}
+func (s *Server) handlePortalWebmailMessage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, 405, "METHOD_NOT_ALLOWED", "Method not allowed")
+		return
+	}
+	sess := s.requirePortal(w, r)
+	if sess == nil {
+		return
+	}
+	password := strings.TrimSpace(r.Header.Get("X-Mail-Password"))
+	if err := s.portalMailboxAuth(r.Context(), sess.Subject, password); err != nil {
+		writeErr(w, 401, "AUTH_FAILED", err.Error())
+		return
+	}
+	parts := strings.Split(trimAnyPrefix(r.URL.Path, "/api/v1/portal/webmail/messages/", "/api/v1/tenants/"+sess.Workspace+"/mail/webmail/messages/"), "/")
+	if len(parts) < 1 || strings.TrimSpace(parts[0]) == "" {
+		writeErr(w, 400, "BAD_REQUEST", "missing message id")
+		return
+	}
+	seq, err := strconv.Atoi(parts[0])
+	if err != nil || seq <= 0 {
+		writeErr(w, 400, "BAD_REQUEST", "invalid message id")
+		return
+	}
+	msg, err := s.portalMessage(r.Context(), sess.Subject, password, seq)
+	if err != nil {
+		writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "item": msg})
+}
+func (s *Server) handlePortalWebmailSend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "METHOD_NOT_ALLOWED", "Method not allowed")
+		return
+	}
+	sess := s.requirePortal(w, r)
+	if sess == nil {
+		return
+	}
+	password := strings.TrimSpace(r.Header.Get("X-Mail-Password"))
+	if err := s.portalMailboxAuth(r.Context(), sess.Subject, password); err != nil {
+		writeErr(w, 401, "AUTH_FAILED", err.Error())
+		return
+	}
+	var req struct {
+		To      string `json:"to"`
+		Subject string `json:"subject"`
+		Body    string `json:"body"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeErr(w, 400, "BAD_REQUEST", "Invalid JSON body")
+		return
+	}
+	if strings.TrimSpace(req.To) == "" {
+		writeErr(w, 400, "BAD_REQUEST", "Recipient is required")
+		return
+	}
+	if len(strings.TrimSpace(req.Body)) == 0 {
+		writeErr(w, 400, "BAD_REQUEST", "Body is required")
+		return
+	}
+	if err := s.portalSendMail(r.Context(), sess.Subject, password, req.To, req.Subject, req.Body); err != nil {
+		writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
+		return
+	}
+	s.audit(r.Context(), "mailbox", sess.Subject, "portal.webmail_send", req.To, `{}`)
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
 func (s *Server) routeTenants(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/v1/tenants" {
 		if r.Method != http.MethodGet {
@@ -1355,7 +1784,19 @@ func (s *Server) routeTenants(w http.ResponseWriter, r *http.Request) {
 		s.handlePortalAliases(w, r)
 	case "account/password":
 		s.handlePortalPassword(w, r)
+	case "webmail/inbox":
+		s.handlePortalWebmailInbox(w, r)
+	case "webmail/send":
+		s.handlePortalWebmailSend(w, r)
+	case "webmail/messages":
+		writeErr(w, 400, "BAD_REQUEST", "missing message id")
+	case "webmail/messages/":
+		writeErr(w, 400, "BAD_REQUEST", "missing message id")
 	default:
+		if strings.HasPrefix(action, "webmail/messages/") {
+			s.handlePortalWebmailMessage(w, r)
+			return
+		}
 		writeErr(w, 404, "NOT_FOUND", "Route not found")
 	}
 }
@@ -2099,6 +2540,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/v1/portal/account/profile", s.handlePortalProfile)
 	mux.HandleFunc("/api/v1/portal/account/aliases", s.handlePortalAliases)
 	mux.HandleFunc("/api/v1/portal/account/password", s.handlePortalPassword)
+	mux.HandleFunc("/api/v1/portal/webmail/inbox", s.handlePortalWebmailInbox)
+	mux.HandleFunc("/api/v1/portal/webmail/send", s.handlePortalWebmailSend)
+	mux.HandleFunc("/api/v1/portal/webmail/messages/", s.handlePortalWebmailMessage)
 	mux.HandleFunc("/api/v1/admin/domains", s.handleDomains)
 	mux.HandleFunc("/api/v1/admin/domains/", s.handleDomainItem)
 	mux.HandleFunc("/api/v1/admin/mailboxes", s.handleMailboxes)
