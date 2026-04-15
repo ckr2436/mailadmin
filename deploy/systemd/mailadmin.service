@@ -5,8 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=mailops
+Group=mailops
 WorkingDirectory=/opt/apps/mailops/backend
 EnvironmentFile=/opt/apps/mailops/deploy/systemd/mailadmin.env
 ExecStart=/opt/apps/mailops/backend/bin/mailadmin-api
@@ -20,7 +20,14 @@ ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
 RestrictNamespaces=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
 LockPersonality=true
 MemoryDenyWriteExecute=true
 ReadWritePaths=/opt/apps/mailops/backend /opt/apps/mailops/frontend/dist /tmp

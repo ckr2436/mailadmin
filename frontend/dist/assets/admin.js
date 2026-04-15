@@ -34,7 +34,7 @@ function hideBox(id){ const el=qs(id); if(el) el.classList.add('hidden'); }
 function badge(active){ return `<span class="badge ${active ? 'green':'red'}">${active ? 'active':'disabled'}</span>`; }
 function yesno(v){ return v ? '✓' : '—'; }
 function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
-function csrfToken(){ const pair = document.cookie.split('; ').find(v=>v.startsWith('mailadmin_csrf_')); return pair ? decodeURIComponent(pair.split('=')[1] || '') : ''; }
+function csrfToken(){ const pair = document.cookie.split('; ').find(v=>v.startsWith('mailadmin_csrf_admin=')); return pair ? decodeURIComponent(pair.split('=')[1] || '') : ''; }
 
 function buildTabs() {
   const tabs = [
@@ -42,10 +42,10 @@ function buildTabs() {
     ['domains','Domains'],
     ['mailboxes','Mailboxes'],
     ['aliases','Aliases'],
-    ['health','Health'],
   ];
   if (state.session?.workspace_scope === 'platform') {
     tabs.splice(1, 0, ['workspaces','Workspaces'], ['admins','Admins']);
+    tabs.push(['health','Health']);
   }
   const host = qs('#tabs');
   host.innerHTML = tabs.map(([k,label], i)=>`<div class="tab ${i===0?'active':''}" data-tab="${k}">${label}</div>`).join('');
@@ -95,7 +95,9 @@ async function refreshSession(){
   }
 }
 async function loadAll(){
-  await Promise.all([loadWorkspaces(), loadDomains(), loadMailboxes(), loadAliases(), loadHealth()]);
+  const tasks = [loadWorkspaces(), loadDomains(), loadMailboxes(), loadAliases()];
+  if (state.session?.workspace_scope === 'platform') tasks.push(loadHealth());
+  await Promise.all(tasks);
   if (state.session?.workspace_scope === 'platform') await loadAdmins();
   renderDashboard();
 }
