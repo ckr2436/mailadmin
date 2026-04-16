@@ -46,6 +46,42 @@ function hideBox(id) {
 function clearMailState() {
   sessionStorage.removeItem('mail.webmailToken');
   sessionStorage.removeItem('mail.mailboxEmail');
+  sessionStorage.removeItem('mail.workspaceSlug');
+}
+
+function emailDomain(email) {
+  const at = String(email || '').lastIndexOf('@');
+  if (at < 0) return '';
+  return String(email).slice(at + 1).trim().toLowerCase();
+}
+
+function pickWorkspaceByDomain(workspaces, domain) {
+  const normalizedDomain = String(domain || '').toLowerCase();
+  if (!normalizedDomain) return '';
+  const matches = (ws) => {
+    const defaultDomain = String(ws.default_domain || '').toLowerCase();
+    const domains = Array.isArray(ws.domains) ? ws.domains.map((d) => String(d || '').toLowerCase()) : [];
+    return defaultDomain === normalizedDomain || domains.includes(normalizedDomain);
+  };
+  const found = (workspaces || []).find(matches);
+  return found?.slug || '';
+}
+
+async function resolveWorkspaceSlug(email) {
+  const domain = emailDomain(email);
+  if (!domain) return 'default';
+  const cached = sessionStorage.getItem('mail.workspaceSlug') || '';
+  if (cached) return cached;
+  try {
+    const data = await api('/api/v1/tenants');
+    const items = Array.isArray(data?.items) ? data.items : [];
+    const matched = pickWorkspaceByDomain(items, domain);
+    if (matched) return matched;
+    if (items.length === 1 && items[0]?.slug) return items[0].slug;
+  } catch (_) {
+    // Fall back to default workspace when tenant discovery is unavailable.
+  }
+  return 'default';
 }
 
 async function logoutToLogin() {
@@ -66,12 +102,18 @@ async function handleLoginPage() {
       return;
     }
     try {
-      await api('/api/v1/portal/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) });
+      const workspaceSlug = await resolveWorkspaceSlug(email);
+      await api('/api/v1/portal/auth/login', {
+        method: 'POST',
+        headers: { 'X-Workspace-Slug': workspaceSlug },
+        body: JSON.stringify({ email, password }),
+      });
       const connected = await api('/api/v1/portal/webmail/connect', { method: 'POST', body: JSON.stringify({ password }) });
       const webmailToken = connected.webmail_token || '';
       if (!webmailToken) throw new Error('Failed to initialize mailbox session.');
       sessionStorage.setItem('mail.webmailToken', webmailToken);
       sessionStorage.setItem('mail.mailboxEmail', email);
+      sessionStorage.setItem('mail.workspaceSlug', workspaceSlug);
       qs('#mailLoginPassword').value = '';
       location.href = '/mail/';
     } catch (e) {
