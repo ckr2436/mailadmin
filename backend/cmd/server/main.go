@@ -60,6 +60,7 @@ type Config struct {
 	AdminTable                 string
 	AuditTable                 string
 	AdminWorkspaceBindingTable string
+	RedisNetwork               string
 	RedisAddr                  string
 	RedisPassword              string
 	RedisDB                    int
@@ -239,6 +240,7 @@ func loadConfig() (Config, error) {
 		AdminTable:                 env("ADMIN_TABLE", "app_admin_users"),
 		AuditTable:                 env("AUDIT_TABLE", "app_audit_logs"),
 		AdminWorkspaceBindingTable: env("ADMIN_WORKSPACE_BINDING_TABLE", "app_admin_workspace_bindings"),
+		RedisNetwork:               env("REDIS_NETWORK", "tcp"),
 		RedisAddr:                  env("REDIS_ADDR", "127.0.0.1:6379"),
 		RedisPassword:              os.Getenv("REDIS_PASSWORD"),
 		RedisDB:                    int(envInt64("REDIS_DB", 0)),
@@ -249,6 +251,16 @@ func loadConfig() (Config, error) {
 	}
 	if strings.TrimSpace(cfg.WebmailTokenEncKey) == "" {
 		return cfg, fmt.Errorf("WEBMAIL_TOKEN_ENC_KEY is required")
+	}
+	cfg.RedisNetwork = strings.ToLower(strings.TrimSpace(cfg.RedisNetwork))
+	if cfg.RedisNetwork != "tcp" && cfg.RedisNetwork != "unix" {
+		return cfg, fmt.Errorf("REDIS_NETWORK must be tcp or unix")
+	}
+	if strings.TrimSpace(cfg.RedisAddr) == "" {
+		return cfg, fmt.Errorf("REDIS_ADDR is required")
+	}
+	if cfg.RedisNetwork == "unix" && !strings.HasPrefix(strings.TrimSpace(cfg.RedisAddr), "/") {
+		return cfg, fmt.Errorf("REDIS_ADDR must be an absolute socket path when REDIS_NETWORK=unix")
 	}
 	return cfg, nil
 }
@@ -1490,7 +1502,11 @@ func (s *Server) redisRun(ctx context.Context, args ...string) (string, error) {
 		return "", fmt.Errorf("REDIS_ADDR is required")
 	}
 	d := net.Dialer{Timeout: 3 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", addr)
+	network := s.cfg.RedisNetwork
+	if network == "" {
+		network = "tcp"
+	}
+	conn, err := d.DialContext(ctx, network, addr)
 	if err != nil {
 		return "", err
 	}
@@ -3079,6 +3095,7 @@ func main() {
 	if err := srv.checkRedisReady(startupCtx); err != nil {
 		logger.Fatalf("startup dependency check failed: redis not ready: %v", err)
 	}
+	logger.Printf("redis backend: network=%s addr=%s db=%d", cfg.RedisNetwork, cfg.RedisAddr, cfg.RedisDB)
 	httpServer := &http.Server{
 		Addr:              cfg.AppAddr,
 		Handler:           srv.routes(),
