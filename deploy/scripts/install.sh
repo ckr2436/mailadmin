@@ -50,6 +50,26 @@ install -m 600 "$SYSTEMD_ENV" "$SYSTEMD_ENV"
 
 if command -v systemctl >/dev/null 2>&1; then
   cp -f "$APP_ROOT/deploy/systemd/mailadmin.service" /etc/systemd/system/mailadmin.service
+  REDIS_NETWORK_VALUE="$(
+    awk -F= '/^REDIS_NETWORK=/{print $2}' "$SYSTEMD_ENV" 2>/dev/null | tail -n1 | tr -d '[:space:]'
+  )"
+  REDIS_GROUP_DROPIN_DIR="/etc/systemd/system/mailadmin.service.d"
+  REDIS_GROUP_DROPIN="$REDIS_GROUP_DROPIN_DIR/redis-unix.conf"
+  if [ "$REDIS_NETWORK_VALUE" = "unix" ]; then
+    if getent group "valkey-mail" >/dev/null 2>&1; then
+      install -d -m 755 "$REDIS_GROUP_DROPIN_DIR"
+      cat >"$REDIS_GROUP_DROPIN" <<'EOF'
+[Service]
+SupplementaryGroups=valkey-mail
+EOF
+      echo "systemd unix-socket drop-in installed: $REDIS_GROUP_DROPIN"
+    else
+      rm -f "$REDIS_GROUP_DROPIN"
+      echo "warning: REDIS_NETWORK=unix but group valkey-mail does not exist; skipping SupplementaryGroups drop-in"
+    fi
+  else
+    rm -f "$REDIS_GROUP_DROPIN"
+  fi
   systemctl daemon-reload
   echo "systemd unit installed: /etc/systemd/system/mailadmin.service"
 fi
