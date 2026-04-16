@@ -59,13 +59,18 @@ if command -v systemctl >/dev/null 2>&1; then
     if getent group "valkey-mail" >/dev/null 2>&1; then
       install -d -m 755 "$REDIS_GROUP_DROPIN_DIR"
       cat >"$REDIS_GROUP_DROPIN" <<'EOF'
+[Unit]
+After=valkey-mail.service
+Wants=valkey-mail.service
+
 [Service]
 SupplementaryGroups=valkey-mail
 EOF
       echo "systemd unix-socket drop-in installed: $REDIS_GROUP_DROPIN"
     else
       rm -f "$REDIS_GROUP_DROPIN"
-      echo "warning: REDIS_NETWORK=unix but group valkey-mail does not exist; skipping SupplementaryGroups drop-in"
+      echo "error: REDIS_NETWORK=unix but group valkey-mail does not exist" >&2
+      exit 1
     fi
   else
     rm -f "$REDIS_GROUP_DROPIN"
