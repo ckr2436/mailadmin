@@ -1428,47 +1428,13 @@ func normalizePreview(raw string, limit int) string {
 	return joined
 }
 
-func (s *Server) redisRun(ctx context.Context, args ...string) (string, error) {
-	addr := strings.TrimSpace(s.cfg.RedisAddr)
-	if addr == "" {
-		return "", fmt.Errorf("REDIS_ADDR is required")
-	}
-	d := net.Dialer{Timeout: 3 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return "", err
-	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	if s.cfg.RedisPassword != "" {
-		if _, err := fmt.Fprintf(conn, "*2\r\n$4\r\nAUTH\r\n$%d\r\n%s\r\n", len(s.cfg.RedisPassword), s.cfg.RedisPassword); err != nil {
-			return "", err
-		}
-		if _, err := bufio.NewReader(conn).ReadString('\n'); err != nil {
-			return "", err
-		}
-	}
-	if s.cfg.RedisDB > 0 {
-		dbText := strconv.Itoa(s.cfg.RedisDB)
-		if _, err := fmt.Fprintf(conn, "*2\r\n$6\r\nSELECT\r\n$%d\r\n%s\r\n", len(dbText), dbText); err != nil {
-			return "", err
-		}
-		if _, err := bufio.NewReader(conn).ReadString('\n'); err != nil {
-			return "", err
-		}
-	}
-	if _, err := fmt.Fprintf(conn, "*%d\r\n", len(args)); err != nil {
-		return "", err
-	}
-	for _, a := range args {
-		if _, err := fmt.Fprintf(conn, "$%d\r\n%s\r\n", len(a), a); err != nil {
-			return "", err
-		}
-	}
-	rd := bufio.NewReader(conn)
+func readRedisResponse(rd *bufio.Reader) (string, error) {
 	line, err := rd.ReadString('\n')
 	if err != nil {
 		return "", err
+	}
+	if len(line) == 0 {
+		return "", fmt.Errorf("empty redis response")
 	}
 	switch line[0] {
 	case '+', ':':
@@ -1516,6 +1482,47 @@ func (s *Server) redisRun(ctx context.Context, args ...string) (string, error) {
 	default:
 		return "", fmt.Errorf("unexpected redis response: %q", line)
 	}
+}
+
+func (s *Server) redisRun(ctx context.Context, args ...string) (string, error) {
+	addr := strings.TrimSpace(s.cfg.RedisAddr)
+	if addr == "" {
+		return "", fmt.Errorf("REDIS_ADDR is required")
+	}
+	d := net.Dialer{Timeout: 3 * time.Second}
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	rd := bufio.NewReader(conn)
+	if s.cfg.RedisPassword != "" {
+		if _, err := fmt.Fprintf(conn, "*2\r\n$4\r\nAUTH\r\n$%d\r\n%s\r\n", len(s.cfg.RedisPassword), s.cfg.RedisPassword); err != nil {
+			return "", err
+		}
+		if _, err := readRedisResponse(rd); err != nil {
+			return "", err
+		}
+	}
+	if s.cfg.RedisDB > 0 {
+		dbText := strconv.Itoa(s.cfg.RedisDB)
+		if _, err := fmt.Fprintf(conn, "*2\r\n$6\r\nSELECT\r\n$%d\r\n%s\r\n", len(dbText), dbText); err != nil {
+			return "", err
+		}
+		if _, err := readRedisResponse(rd); err != nil {
+			return "", err
+		}
+	}
+	if _, err := fmt.Fprintf(conn, "*%d\r\n", len(args)); err != nil {
+		return "", err
+	}
+	for _, a := range args {
+		if _, err := fmt.Fprintf(conn, "$%d\r\n%s\r\n", len(a), a); err != nil {
+			return "", err
+		}
+	}
+	return readRedisResponse(rd)
 }
 
 func (s *Server) webmailTokenKey(token string) string {

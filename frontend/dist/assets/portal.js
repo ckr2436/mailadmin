@@ -40,7 +40,7 @@ async function refreshPortalSession(){
     const data = await api(portalPath('auth/session'));
     qs('#portalLoginBox').classList.add('hidden');
     qs('#portalApp').classList.remove('hidden');
-    qs('#portalSessionBadge').textContent = `${data.email || data.subject || 'session'} · ${data.workspace_slug || currentWorkspace}`;
+    qs('#portalSessionBadge').textContent = `${data.email || data.subject || 'session'} · ${data.workspace_slug || ''}`;
     await Promise.all([loadProfile(), loadAliases()]);
     if(webmailToken){
       await loadInbox();
