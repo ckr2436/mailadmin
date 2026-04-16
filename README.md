@@ -135,7 +135,7 @@ systemctl enable --now mailadmin
 
 ### nginx
 - `/admin/` → 管理后台静态页
-- `/portal/` → 邮箱用户前台静态页
+- `/mail/` → 邮箱用户 Webmail 静态页（`/portal/` 会重定向到 `/mail/`）
 - `/api/` → 反代 Go API
 - `/assets/` → 静态资源缓存 7 天
 
@@ -166,4 +166,4 @@ chmod 600 /opt/apps/mailops/deploy/systemd/mailadmin.env
 ## 默认入口
 
 - 管理后台：`https://mail.myupona.com/admin/`
-- 用户前台：`https://mail.myupona.com/portal/`
+- 用户前台：`https://mail.myupona.com/`（登录后进入 `https://mail.myupona.com/mail/`）

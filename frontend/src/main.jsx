@@ -6,13 +6,12 @@ function App() {
   return (
     <div className="login-shell">
       <div className="login-card card">
-        <div className="brand">MailOps Frontend Source</div>
-        <div className="muted" style={{ marginTop: 10 }}>
-          这个目录是 React/Vite 源码基线，当前可直接上线的静态产物仍在 <code>frontend/dist/</code>。
-        </div>
+        <div className="brand">myupona Mail</div>
+        <div className="muted" style={{ marginTop: 10 }}>This source baseline now mirrors production routing.</div>
         <div className="list" style={{ marginTop: 18 }}>
-          <a className="list-item" href="/admin/">打开管理员后台</a>
-          <a className="list-item" href="/portal/">打开邮箱用户中心</a>
+          <a className="list-item" href="/">Mailbox Sign in</a>
+          <a className="list-item" href="/mail/">Webmail Dashboard</a>
+          <a className="list-item" href="/admin/">Admin Console</a>
         </div>
       </div>
     </div>
