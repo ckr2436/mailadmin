@@ -7,6 +7,7 @@ Wants=network-online.target valkey-mail.service
 Type=simple
 User=mailops
 Group=mailops
+SupplementaryGroups=valkey-mail
 WorkingDirectory=/opt/apps/mailops/backend
 EnvironmentFile=/opt/apps/mailops/deploy/systemd/mailadmin.env
 ExecStart=/opt/apps/mailops/backend/bin/mailadmin-api
