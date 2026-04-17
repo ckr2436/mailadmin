@@ -1,67 +1,15 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Webmail</title>
-  <link rel="stylesheet" href="/assets/app.css"/>
+  <script type="module" crossorigin src="/assets/mail-TNEOTYDq.js"></script>
+  <link rel="modulepreload" crossorigin href="/assets/styles-y8qumGzR.js">
+  <link rel="modulepreload" crossorigin href="/assets/auth-C5IoXEfX.js">
+  <link rel="stylesheet" crossorigin href="/assets/styles-CxTk7w7S.css">
 </head>
 <body>
-  <div class="wrap">
-    <div class="toolbar" style="margin-bottom:14px">
-      <div class="brand">Webmail</div>
-      <span id="mailSessionBadge" class="badge"></span>
-      <div class="grow"></div>
-      <button id="mailBtnRefresh" class="secondary small">Refresh</button>
-      <button id="mailBtnLogout" class="ghost small">Sign out</button>
-    </div>
-    <div id="mailTopMsg" class="hidden" style="margin-bottom:12px"></div>
-
-    <div class="mail-layout">
-      <aside class="card">
-        <h3>Account</h3>
-        <div id="mailProfile" class="list"></div>
-        <hr/>
-        <h3>Aliases</h3>
-        <div id="mailAliases" class="list"></div>
-        <hr/>
-        <h3>Password</h3>
-        <div class="form-row">
-          <div><input id="mailCurrentPassword" type="password" placeholder="Current password"></div>
-          <div><input id="mailNewPassword" type="password" placeholder="New password"></div>
-          <div><button id="mailBtnPassword">Update password</button></div>
-        </div>
-        <div id="mailPwdMsg" class="hidden" style="margin-top:10px"></div>
-      </aside>
-
-      <main class="mail-main">
-        <div class="card webmail-pane">
-          <div class="toolbar" style="margin-bottom:8px">
-            <b>Inbox</b>
-            <div class="grow"></div>
-            <span class="smalltext">Recent 20 messages</span>
-          </div>
-          <div id="mailInboxList" class="mail-list"></div>
-        </div>
-
-        <div class="card webmail-pane">
-          <b>Message</b>
-          <div id="mailViewer" class="mail-viewer muted" style="margin-top:8px">Select a message from inbox.</div>
-        </div>
-
-        <div class="card webmail-pane">
-          <h3>Compose</h3>
-          <div class="form-row">
-            <div><input id="mailComposeTo" placeholder="To"></div>
-            <div><input id="mailComposeSubject" placeholder="Subject"></div>
-            <div><textarea id="mailComposeBody" placeholder="Message body"></textarea></div>
-            <div><button id="mailBtnSend">Send</button></div>
-          </div>
-          <div id="mailComposeMsg" class="hidden" style="margin-top:10px"></div>
-        </div>
-      </main>
-    </div>
-  </div>
-  <script src="/assets/mail.js"></script>
+  <div id="root"></div>
 </body>
 </html>
