@@ -93,6 +93,7 @@ if command -v systemctl >/dev/null 2>&1 && [ "$(id -u)" -eq 0 ]; then
   )"
 
   if [ "$REDIS_NETWORK_VALUE" = "unix" ]; then
+    rm -f "$DROPIN_DIR/redis-unix.conf"
     if getent group "valkey-mail" >/dev/null 2>&1; then
       cat > "$DROPIN_DIR/40-redis-unix.conf" <<'EOC'
 [Unit]
@@ -107,7 +108,7 @@ EOC
       exit 1
     fi
   else
-    rm -f "$DROPIN_DIR/40-redis-unix.conf"
+    rm -f "$DROPIN_DIR/40-redis-unix.conf" "$DROPIN_DIR/redis-unix.conf"
   fi
 
   systemctl daemon-reload
