@@ -96,6 +96,37 @@ function AdminApp() {
     setBindingsByUser((prev) => ({ ...prev, [targetUser]: res.items || [] }))
   }
 
+  const upsertBinding = async () => {
+    const targetUser = bindingForm.username.trim()
+    const targetWorkspace = bindingForm.workspace_slug.trim()
+    if (!targetUser || !targetWorkspace) throw new Error('username 和 workspace_slug 不能为空')
+
+    const currentBindings = bindingsByUser[targetUser]
+      || (await apiRequest(`/api/v1/platform/admin-users/${encodeURIComponent(targetUser)}/workspaces`, { csrfCookieName: ADMIN_CSRF })).items
+      || []
+
+    const nextBinding = {
+      workspace_slug: targetWorkspace,
+      can_read: bindingForm.can_read,
+      can_write: bindingForm.can_write,
+      manage_domains: bindingForm.manage_domains,
+      manage_mailboxes: bindingForm.manage_mailboxes,
+      manage_aliases: bindingForm.manage_aliases,
+    }
+
+    const hasExistingBinding = currentBindings.some((item) => item.workspace_slug === targetWorkspace)
+    const mergedBindings = hasExistingBinding
+      ? currentBindings.map((item) => (item.workspace_slug === targetWorkspace ? { ...item, ...nextBinding } : item))
+      : [...currentBindings, nextBinding]
+
+    await apiRequest(`/api/v1/platform/admin-users/${encodeURIComponent(targetUser)}/workspaces`, {
+      method: 'PUT',
+      body: { bindings: mergedBindings },
+      csrfCookieName: ADMIN_CSRF,
+    })
+    setBindingsByUser((prev) => ({ ...prev, [targetUser]: mergedBindings }))
+  }
+
   const loadDomains = async (workspace = '') => {
     const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
     const res = await apiRequest(`/api/v1/platform/mail/domains${query}`, { csrfCookieName: ADMIN_CSRF })
@@ -345,21 +376,7 @@ function AdminApp() {
                 <form className="form-row" onSubmit={(e) => {
                   e.preventDefault()
                   withStatus(async () => {
-                    await apiRequest(`/api/v1/platform/admin-users/${encodeURIComponent(bindingForm.username)}/workspaces`, {
-                      method: 'PUT',
-                      body: {
-                        bindings: [{
-                          workspace_slug: bindingForm.workspace_slug,
-                          can_read: bindingForm.can_read,
-                          can_write: bindingForm.can_write,
-                          manage_domains: bindingForm.manage_domains,
-                          manage_mailboxes: bindingForm.manage_mailboxes,
-                          manage_aliases: bindingForm.manage_aliases,
-                        }],
-                      },
-                      csrfCookieName: ADMIN_CSRF,
-                    })
-                    await loadBindings(bindingForm.username)
+                    await upsertBinding()
                   }, '管理员 workspace 绑定已更新')
                 }}>
                   <div className="span-6"><input placeholder="username" value={bindingForm.username} onChange={(e) => setBindingForm((v) => ({ ...v, username: e.target.value }))} /></div>
