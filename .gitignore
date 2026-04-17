@@ -2,3 +2,7 @@ frontend/dist/
 frontend/node_modules/
 .release/
 release.tar.gz
+
+backend/.env
+backend/.env.*
+deploy/systemd/mailadmin.env
