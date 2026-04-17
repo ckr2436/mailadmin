@@ -47,6 +47,8 @@ function clearMailState() {
   sessionStorage.removeItem('mail.webmailToken');
   sessionStorage.removeItem('mail.mailboxEmail');
   sessionStorage.removeItem('mail.workspaceSlug');
+  sessionStorage.removeItem('mail.workspaceDomain');
+  sessionStorage.removeItem('mail.workspaceByDomain');
 }
 
 function emailDomain(email) {
@@ -67,20 +69,47 @@ function pickWorkspaceByDomain(workspaces, domain) {
   return found?.slug || '';
 }
 
+function getWorkspaceDomainCache() {
+  try {
+    const raw = sessionStorage.getItem('mail.workspaceByDomain');
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function setWorkspaceDomainCache(domain, slug) {
+  if (!domain || !slug) return;
+  const cache = getWorkspaceDomainCache();
+  cache[domain] = slug;
+  sessionStorage.setItem('mail.workspaceByDomain', JSON.stringify(cache));
+}
+
 async function resolveWorkspaceSlug(email) {
   const domain = emailDomain(email);
   if (!domain) return 'default';
-  const cached = sessionStorage.getItem('mail.workspaceSlug') || '';
-  if (cached) return cached;
+  const byDomain = getWorkspaceDomainCache();
+  if (byDomain[domain]) return byDomain[domain];
+  const legacyCached = sessionStorage.getItem('mail.workspaceSlug') || '';
+  const legacyDomain = sessionStorage.getItem('mail.workspaceDomain') || '';
+  if (legacyCached && legacyDomain && legacyDomain === domain) return legacyCached;
   try {
     const data = await api('/api/v1/tenants');
     const items = Array.isArray(data?.items) ? data.items : [];
     const matched = pickWorkspaceByDomain(items, domain);
-    if (matched) return matched;
-    if (items.length === 1 && items[0]?.slug) return items[0].slug;
+    if (matched) {
+      setWorkspaceDomainCache(domain, matched);
+      return matched;
+    }
+    if (items.length === 1 && items[0]?.slug) {
+      setWorkspaceDomainCache(domain, items[0].slug);
+      return items[0].slug;
+    }
   } catch (_) {
     // Fall back to default workspace when tenant discovery is unavailable.
   }
+  setWorkspaceDomainCache(domain, 'default');
   return 'default';
 }
 
@@ -114,6 +143,8 @@ async function handleLoginPage() {
       sessionStorage.setItem('mail.webmailToken', webmailToken);
       sessionStorage.setItem('mail.mailboxEmail', email);
       sessionStorage.setItem('mail.workspaceSlug', workspaceSlug);
+      sessionStorage.setItem('mail.workspaceDomain', emailDomain(email));
+      setWorkspaceDomainCache(emailDomain(email), workspaceSlug);
       qs('#mailLoginPassword').value = '';
       location.href = '/mail/';
     } catch (e) {
