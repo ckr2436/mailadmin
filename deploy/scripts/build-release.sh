@@ -34,7 +34,10 @@ echo "==> Copying frontend dist"
 cp -a "$SRC_ROOT/frontend/dist" "$RELEASE_ROOT/frontend/dist"
 
 echo "==> Copying deploy assets"
-cp -a "$SRC_ROOT/deploy/systemd" "$RELEASE_ROOT/deploy/systemd"
+mkdir -p "$RELEASE_ROOT/deploy/systemd/mailadmin.service.d"
+cp -a "$SRC_ROOT/deploy/systemd/mailadmin.service" "$RELEASE_ROOT/deploy/systemd/mailadmin.service"
+cp -a "$SRC_ROOT/deploy/systemd/mailadmin.env.example" "$RELEASE_ROOT/deploy/systemd/mailadmin.env.example"
+cp -a "$SRC_ROOT/deploy/systemd/mailadmin.service.d/redis-unix.conf" "$RELEASE_ROOT/deploy/systemd/mailadmin.service.d/redis-unix.conf"
 cp -a "$SRC_ROOT/deploy/nginx" "$RELEASE_ROOT/deploy/nginx"
 
 echo "==> Validating release contents"
