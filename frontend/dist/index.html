@@ -1,11 +1,29 @@
 <!doctype html>
-<html lang="zh-CN">
-<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>MailOps</title><link rel="stylesheet" href="/assets/app.css"/></head>
-<body><div class="login-shell"><div class="login-card card">
-<div class="brand">MailOps</div>
-<div class="muted" style="margin:10px 0 18px">mail.myupona.com 控制台入口</div>
-<div class="list">
-  <a class="list-item" href="/admin/">Platform Console<div class="smalltext">管理员后台：workspace / domain / mailbox / alias / admin bindings</div></a>
-  <a class="list-item" href="/portal/">Tenant Portal<div class="smalltext">邮箱用户：查看邮箱信息、别名、修改密码</div></a>
-</div>
-</div></div></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Mail Login</title>
+  <link rel="stylesheet" href="/assets/app.css"/>
+</head>
+<body>
+  <div class="login-shell">
+    <div class="login-card card">
+      <div class="brand">myupona Mail</div>
+      <div class="muted" style="margin:10px 0 18px">Mail for myupona.com</div>
+      <h2 style="margin-bottom:10px">Sign in to your mailbox</h2>
+      <div class="smalltext" style="margin-bottom:14px">Access webmail for your domain account.</div>
+      <div class="form-row">
+        <div><input id="mailLoginEmail" placeholder="Email address" autocomplete="username"></div>
+        <div><input id="mailLoginPassword" type="password" placeholder="Password" autocomplete="current-password"></div>
+        <div><button id="mailLoginSubmit">Sign in</button></div>
+      </div>
+      <div id="mailLoginMsg" class="hidden" style="margin-top:10px"></div>
+      <div style="margin-top:14px;text-align:right">
+        <a class="smalltext" href="/admin/">Admin Console</a>
+      </div>
+    </div>
+  </div>
+  <script src="/assets/mail.js"></script>
+</body>
+</html>
