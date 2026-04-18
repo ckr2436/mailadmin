@@ -33,6 +33,7 @@ test -f "$RELEASE_ROOT/frontend/dist/mail/index.html"
 test -f "$RELEASE_ROOT/frontend/dist/admin/index.html"
 test -f "$RELEASE_ROOT/deploy/systemd/mailadmin.service"
 test -f "$RELEASE_ROOT/deploy/systemd/mailadmin.env.example"
+test -f "$RELEASE_ROOT/deploy/systemd/mailadmin.service.d/redis-unix.conf"
 test -f "$RELEASE_ROOT/deploy/nginx/mail.myupona.com.conf"
 
 echo "==> Backing up existing env files"
@@ -95,14 +96,8 @@ if command -v systemctl >/dev/null 2>&1 && [ "$(id -u)" -eq 0 ]; then
   if [ "$REDIS_NETWORK_VALUE" = "unix" ]; then
     rm -f "$DROPIN_DIR/redis-unix.conf"
     if getent group "valkey-mail" >/dev/null 2>&1; then
-      cat > "$DROPIN_DIR/40-redis-unix.conf" <<'EOC'
-[Unit]
-After=valkey-mail.service
-Wants=valkey-mail.service
-
-[Service]
-SupplementaryGroups=valkey-mail dovecot
-EOC
+      cp -f "$APP_ROOT/deploy/systemd/mailadmin.service.d/redis-unix.conf" \
+        "$DROPIN_DIR/40-redis-unix.conf"
     else
       echo "error: REDIS_NETWORK=unix but group valkey-mail does not exist" >&2
       exit 1

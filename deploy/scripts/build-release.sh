@@ -50,6 +50,7 @@ test -f "$RELEASE_ROOT/frontend/dist/admin/index.html"
 test -f "$RELEASE_ROOT/deploy/scripts/install.sh"
 test -f "$RELEASE_ROOT/deploy/systemd/mailadmin.service"
 test -f "$RELEASE_ROOT/deploy/systemd/mailadmin.env.example"
+test -f "$RELEASE_ROOT/deploy/systemd/mailadmin.service.d/redis-unix.conf"
 test -f "$RELEASE_ROOT/deploy/nginx/mail.myupona.com.conf"
 
 echo "==> Packaging release.tar.gz"
