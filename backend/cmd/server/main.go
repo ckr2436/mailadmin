@@ -195,8 +195,8 @@ type WebmailAccount struct {
 	Email              string `json:"email"`
 	Workspace          string `json:"workspace"`
 	Domain             string `json:"domain"`
-	PasswordCiphertext string `json:"-"`
-	PasswordHash       string `json:"-"`
+	PasswordCiphertext string `json:"password_ciphertext"`
+	PasswordHash       string `json:"password_hash"`
 	ConnectedAt        int64  `json:"connected_at"`
 	ExpiresAt          int64  `json:"expires_at"`
 }
@@ -2588,9 +2588,9 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 501, "NOT_IMPLEMENTED", "use mailbox settings endpoint")
 		return
 	}
-	if len(parts) >= 6 && parts[1] == "folders" && parts[3] == "messages" && r.Method == http.MethodGet {
+	if len(parts) >= 5 && parts[1] == "folders" && parts[3] == "messages" && r.Method == http.MethodGet {
 		folder := strings.ToUpper(strings.TrimSpace(parts[2]))
-		uid := strings.TrimSpace(parts[5])
+		uid := strings.TrimSpace(parts[4])
 		if folder == "" || uid == "" {
 			writeErr(w, 400, "BAD_REQUEST", "invalid message reference")
 			return
