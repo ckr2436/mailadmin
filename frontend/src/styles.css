@@ -74,3 +74,19 @@ hr{border:none;border-top:1px solid #25324a;margin:16px 0}
 .mail-layout{display:grid;grid-template-columns:300px 1fr;gap:16px;align-items:start}
 .mail-main{display:grid;gap:16px}
 @media (max-width:980px){.mail-layout{grid-template-columns:1fr}}
+
+.webmail-app{height:100vh;display:grid;grid-template-rows:56px 1fr;overflow:hidden}
+.webmail-topbar{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid rgba(148,163,184,.14)}
+.webmail-shell{min-height:0;display:grid;grid-template-columns:260px 380px minmax(0,1fr)}
+.webmail-sidebar{overflow:auto;border-right:1px solid rgba(148,163,184,.14);padding:12px;background:rgba(8,16,32,.45)}
+.inbox-column{overflow:auto;border-right:1px solid rgba(148,163,184,.14)}
+.reader-column{overflow:auto;padding:12px}
+.mailbox-link{display:block;width:100%;text-align:left;padding:8px 10px;border-radius:10px;border:1px solid transparent;background:transparent;color:inherit}
+.mailbox-link.active{background:rgba(59,130,246,.18);border-color:rgba(96,165,250,.4)}
+.mailbox-row{display:flex;align-items:center;gap:6px}
+.mail-row{display:block;width:100%;text-align:left;padding:10px;border:0;border-bottom:1px solid rgba(148,163,184,.14);background:transparent;color:inherit}
+.mail-row:hover{background:rgba(30,41,59,.4)}
+.mail-row-line{display:flex;align-items:center;gap:8px;font-size:12px}
+.mail-row-subject{font-weight:600;margin-top:4px}
+.compose-drawer{position:fixed;right:24px;bottom:24px;width:520px;max-width:calc(100vw - 48px);z-index:20}
+@media (max-width:980px){.webmail-shell{grid-template-columns:1fr}.inbox-column,.reader-column{border-right:0}}

@@ -1,62 +1,56 @@
 import { apiRequest } from './api'
-import { getWebmailToken, clearPortalSession } from './session'
+import { clearPortalSession } from './session'
 
 const PORTAL_CSRF = 'mailadmin_csrf_portal'
-
-function requireToken() {
-  const token = getWebmailToken()
-  if (!token) {
-    const error = new Error('Session expired')
-    error.status = 401
-    throw error
-  }
-  return token
-}
 
 export function handleSessionExpired() {
   clearPortalSession()
   window.location.href = '/'
 }
 
-export async function getPortalSession() {
-  return apiRequest('/api/v1/portal/auth/session', { csrfCookieName: PORTAL_CSRF })
+export async function getMailSession() {
+  return apiRequest('/api/v1/mail/auth/session', { csrfCookieName: PORTAL_CSRF })
 }
 
-export async function getProfile() {
-  return apiRequest('/api/v1/portal/account/profile', { csrfCookieName: PORTAL_CSRF })
+export async function getMailAccounts() {
+  return apiRequest('/api/v1/mail/accounts', { csrfCookieName: PORTAL_CSRF })
 }
 
-export async function getAliases() {
-  return apiRequest('/api/v1/portal/account/aliases', { csrfCookieName: PORTAL_CSRF })
-}
-
-export async function getInbox(limit = 20) {
-  return apiRequest(`/api/v1/portal/webmail/inbox?limit=${limit}`, {
-    authToken: requireToken(),
+export async function connectMailbox(payload) {
+  return apiRequest('/api/v1/mail/accounts', {
+    method: 'POST',
+    body: payload,
     csrfCookieName: PORTAL_CSRF,
   })
 }
 
-export async function getMessage(uid) {
-  return apiRequest(`/api/v1/portal/webmail/messages/${encodeURIComponent(uid)}`, {
-    authToken: requireToken(),
+export async function disconnectMailbox(accountId) {
+  return apiRequest(`/api/v1/mail/accounts/${encodeURIComponent(accountId)}`, {
+    method: 'DELETE',
     csrfCookieName: PORTAL_CSRF,
   })
+}
+
+export async function getInbox(account = 'all', limit = 50) {
+  return apiRequest(`/api/v1/mail/inbox?account=${encodeURIComponent(account)}&limit=${limit}`, { csrfCookieName: PORTAL_CSRF })
+}
+
+export async function getMessage(accountId, uid, folder = 'INBOX') {
+  return apiRequest(`/api/v1/mail/accounts/${encodeURIComponent(accountId)}/folders/${encodeURIComponent(folder)}/messages/${encodeURIComponent(uid)}`, { csrfCookieName: PORTAL_CSRF })
 }
 
 export async function sendMessage(payload) {
-  return apiRequest('/api/v1/portal/webmail/send', {
+  return apiRequest('/api/v1/mail/send', {
     method: 'POST',
-    authToken: requireToken(),
     body: payload,
     csrfCookieName: PORTAL_CSRF,
   })
 }
 
-export async function updatePassword(payload) {
-  return apiRequest('/api/v1/portal/account/password', {
+export async function logoutMailSession() {
+  await apiRequest('/api/v1/mail/auth/logout', {
     method: 'POST',
-    body: payload,
     csrfCookieName: PORTAL_CSRF,
-  })
+  }).catch(() => {})
+  clearPortalSession()
 }

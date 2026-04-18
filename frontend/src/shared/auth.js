@@ -2,7 +2,6 @@ import { apiRequest } from './api'
 import {
   clearPortalSession,
   setMailboxContext,
-  setWebmailToken,
   getWorkspaceByDomainCache,
   setWorkspaceByDomain,
 } from './session'
@@ -60,28 +59,17 @@ export async function resolveWorkspaceSlug(email) {
 export async function loginAndConnect({ email, password }) {
   const workspaceSlug = await resolveWorkspaceSlug(email)
 
-  await apiRequest('/api/v1/portal/auth/login', {
+  const connected = await apiRequest('/api/v1/mail/auth/login', {
     method: 'POST',
     headers: { 'X-Workspace-Slug': workspaceSlug },
     body: { email, password },
     csrfCookieName: PORTAL_CSRF,
   })
 
-  const connected = await apiRequest('/api/v1/portal/webmail/connect', {
-    method: 'POST',
-    body: { password },
-    csrfCookieName: PORTAL_CSRF,
-  })
-
-  const token = connected.webmail_token || ''
-  if (!token) {
-    throw new Error('Failed to initialize mailbox session.')
-  }
-
   const domain = emailDomain(email)
-  setWebmailToken(token)
   setMailboxContext({ email, workspaceSlug, domain })
   setWorkspaceByDomain(domain, workspaceSlug)
+  return connected
 }
 
 export async function logoutPortal() {

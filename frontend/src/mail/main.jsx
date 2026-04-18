@@ -1,141 +1,172 @@
-import React, { useEffect, useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { MailSidebar } from '../components/mail/Sidebar'
-import { InboxList } from '../components/mail/InboxList'
-import { MessageViewer } from '../components/mail/MessageViewer'
-import { ComposePanel } from '../components/mail/ComposePanel'
+import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { logoutPortal } from '../shared/auth'
-import { handleSessionExpired, getAliases, getInbox, getMessage, getPortalSession, getProfile, sendMessage, updatePassword } from '../shared/webmail'
+import {
+  connectMailbox,
+  disconnectMailbox,
+  getInbox,
+  getMailSession,
+  getMessage,
+  handleSessionExpired,
+  logoutMailSession,
+  sendMessage,
+} from '../shared/webmail'
 import '../styles.css'
 
+const queryClient = new QueryClient()
+
 function MailApp() {
-  const [session, setSession] = useState(null)
-  const [profile, setProfile] = useState({})
-  const [aliases, setAliases] = useState([])
-  const [inboxItems, setInboxItems] = useState([])
-  const [selectedMessage, setSelectedMessage] = useState(null)
-  const [topMessage, setTopMessage] = useState(null)
-  const [composeFeedback, setComposeFeedback] = useState(null)
-  const [passwordMessage, setPasswordMessage] = useState(null)
-  const [composeBusy, setComposeBusy] = useState(false)
-  const [passwordBusy, setPasswordBusy] = useState(false)
+  const qc = useQueryClient()
+  const [activeAccountId, setActiveAccountId] = useState('all')
+  const [selectedMessageRef, setSelectedMessageRef] = useState(null)
+  const [composeOpen, setComposeOpen] = useState(false)
+  const [addOpen, setAddOpen] = useState(false)
 
-  const withSessionGuard = async (action) => {
-    try {
-      await action()
-    } catch (error) {
-      if (error.status === 401) {
-        setTopMessage({ kind: 'error', text: 'Session expired. Please sign in again.' })
-        setTimeout(handleSessionExpired, 700)
-        return
-      }
-      setTopMessage({ kind: 'error', text: error.message })
-    }
-  }
-
-  const refreshInbox = () => withSessionGuard(async () => {
-    const data = await getInbox(20)
-    setInboxItems(data.items || [])
+  const sessionQuery = useQuery({ queryKey: ['mailSession'], queryFn: getMailSession, retry: false })
+  const accountsQuery = useQuery({ queryKey: ['mailAccounts'], queryFn: getMailSession, retry: false })
+  const inboxQuery = useQuery({
+    queryKey: ['mailInbox', activeAccountId],
+    queryFn: () => getInbox(activeAccountId, 50),
+    enabled: !!sessionQuery.data,
   })
 
-  const loadMessage = (uid) => withSessionGuard(async () => {
-    const data = await getMessage(uid)
-    setSelectedMessage(data.item || null)
+  const messageQuery = useQuery({
+    queryKey: ['mailMessage', selectedMessageRef?.account_id, selectedMessageRef?.uid],
+    queryFn: () => getMessage(selectedMessageRef.account_id, selectedMessageRef.uid, selectedMessageRef.folder || 'INBOX'),
+    enabled: !!selectedMessageRef?.account_id && !!selectedMessageRef?.uid,
   })
 
-  useEffect(() => {
-    withSessionGuard(async () => {
-      const [sessionData, profileData, aliasData] = await Promise.all([
-        getPortalSession(),
-        getProfile(),
-        getAliases(),
-      ])
-      setSession(sessionData)
-      setProfile(profileData.profile || {})
-      setAliases(aliasData.items || [])
-      const inboxData = await getInbox(20)
-      setInboxItems(inboxData.items || [])
-    })
-  }, [])
+  const connectMutation = useMutation({
+    mutationFn: connectMailbox,
+    onSuccess: () => {
+      setAddOpen(false)
+      qc.invalidateQueries({ queryKey: ['mailAccounts'] })
+      qc.invalidateQueries({ queryKey: ['mailInbox'] })
+    },
+  })
 
-  const onSend = async (event) => {
-    event.preventDefault()
-    setComposeFeedback(null)
-    const form = new FormData(event.currentTarget)
-    const payload = {
-      to: String(form.get('to') || '').trim(),
-      subject: String(form.get('subject') || '').trim(),
-      body: String(form.get('body') || ''),
-    }
+  const disconnectMutation = useMutation({
+    mutationFn: disconnectMailbox,
+    onSuccess: () => {
+      setSelectedMessageRef(null)
+      setActiveAccountId('all')
+      qc.invalidateQueries({ queryKey: ['mailAccounts'] })
+      qc.invalidateQueries({ queryKey: ['mailInbox'] })
+    },
+  })
 
-    setComposeBusy(true)
-    await withSessionGuard(async () => {
-      await sendMessage(payload)
-      setComposeFeedback({ kind: 'success', text: 'Message sent.' })
-      event.currentTarget.reset()
-      await refreshInbox()
-    })
-    setComposeBusy(false)
+  const sendMutation = useMutation({
+    mutationFn: sendMessage,
+    onSuccess: () => {
+      setComposeOpen(false)
+      qc.invalidateQueries({ queryKey: ['mailInbox'] })
+    },
+  })
+
+  const authError = sessionQuery.error?.status === 401 || accountsQuery.error?.status === 401
+  if (authError) {
+    handleSessionExpired()
+    return null
   }
 
-  const onPasswordUpdate = async (event) => {
-    event.preventDefault()
-    setPasswordMessage(null)
-    const form = new FormData(event.currentTarget)
-    const payload = {
-      current_password: String(form.get('current_password') || ''),
-      new_password: String(form.get('new_password') || ''),
-    }
-
-    setPasswordBusy(true)
-    try {
-      await updatePassword(payload)
-      setPasswordMessage({ kind: 'success', text: 'Password updated. Please sign in again.' })
-      setTimeout(async () => {
-        await logoutPortal()
-        window.location.href = '/'
-      }, 500)
-    } catch (error) {
-      setPasswordMessage({ kind: 'error', text: error.message })
-    } finally {
-      setPasswordBusy(false)
-    }
-  }
-
-  const onLogout = async () => {
-    await logoutPortal()
-    window.location.href = '/'
-  }
+  const accounts = accountsQuery.data?.accounts || accountsQuery.data?.items || []
+  const inboxItems = inboxQuery.data?.items || []
+  const defaultFrom = useMemo(() => {
+    if (!accounts.length) return ''
+    if (activeAccountId === 'all') return accounts[0].account_id
+    return activeAccountId
+  }, [activeAccountId, accounts])
 
   return (
-    <div className="wrap">
-      <div className="toolbar" style={{ marginBottom: 14 }}>
-        <div className="brand">Webmail</div>
-        <span className="badge">{session ? `${session.email || session.subject || ''} · ${session.workspace_slug || ''}` : 'Loading...'}</span>
+    <div className="webmail-app">
+      <header className="webmail-topbar">
+        <div className="brand">myupona Mail</div>
+        <span className="badge">{sessionQuery.data?.session?.primary_email || '...'}</span>
         <div className="grow" />
-        <button className="secondary small" onClick={refreshInbox}>Refresh</button>
-        <button className="ghost small" onClick={onLogout}>Sign out</button>
+        <button className="secondary small" onClick={() => qc.invalidateQueries({ queryKey: ['mailInbox'] })}>Refresh</button>
+        <button className="ghost small" onClick={async () => { await logoutMailSession(); await logoutPortal(); window.location.href = '/' }}>Sign out</button>
+      </header>
+
+      <div className="webmail-shell">
+        <aside className="webmail-sidebar">
+          <button className="small" onClick={() => setComposeOpen(true)} style={{ width: '100%', marginBottom: 8 }}>Compose</button>
+          <button className={`mailbox-link ${activeAccountId === 'all' ? 'active' : ''}`} onClick={() => setActiveAccountId('all')}>All Inboxes</button>
+          {accounts.map((account) => (
+            <div key={account.account_id} className="mailbox-row">
+              <button className={`mailbox-link ${activeAccountId === account.account_id ? 'active' : ''}`} onClick={() => setActiveAccountId(account.account_id)}>{account.email}</button>
+              <button className="ghost small" onClick={() => disconnectMutation.mutate(account.account_id)}>×</button>
+            </div>
+          ))}
+          <button className="ghost small" onClick={() => setAddOpen((v) => !v)} style={{ marginTop: 10 }}>+ Add mailbox</button>
+          {addOpen ? (
+            <form className="form-row" onSubmit={(e) => {
+              e.preventDefault()
+              const fd = new FormData(e.currentTarget)
+              connectMutation.mutate({ email: String(fd.get('email') || ''), password: String(fd.get('password') || '') })
+            }}>
+              <input name="email" placeholder="support@domain.com" />
+              <input name="password" type="password" placeholder="Password" />
+              <button disabled={connectMutation.isPending}>{connectMutation.isPending ? 'Connecting...' : 'Connect'}</button>
+            </form>
+          ) : null}
+        </aside>
+
+        <section className="inbox-column">
+          <div className="mail-list">
+            {inboxItems.map((item) => (
+              <button key={item.message_id} className="mail-row" onClick={() => setSelectedMessageRef(item)}>
+                <div className="mail-row-line"><span className="badge">{item.account_email}</span><b>{item.from || '(unknown)'}</b><span className="grow" />{item.internal_date || item.date || ''}</div>
+                <div className="mail-row-subject">{item.subject || '(No subject)'}</div>
+                <div className="mail-item-preview">{item.preview || ''}</div>
+              </button>
+            ))}
+            {!inboxItems.length ? <div className="muted" style={{ padding: 12 }}>No messages</div> : null}
+          </div>
+        </section>
+
+        <section className="reader-column">
+          {messageQuery.data?.item ? (
+            <div className="card webmail-pane">
+              <h3>{messageQuery.data.item.subject || '(No subject)'}</h3>
+              <div className="smalltext">From: {messageQuery.data.item.from || ''}</div>
+              <div className="smalltext">To: {messageQuery.data.item.to || ''}</div>
+              <div className="smalltext">Date: {messageQuery.data.item.date || ''}</div>
+              <div className="smalltext">Account: {messageQuery.data.item.account_email || ''}</div>
+              <hr />
+              <pre className="mail-body">{messageQuery.data.item.text || ''}</pre>
+            </div>
+          ) : <div className="muted" style={{ padding: 12 }}>Select a message.</div>}
+        </section>
       </div>
 
-      {topMessage?.text ? <div className={topMessage.kind} style={{ marginBottom: 12 }}>{topMessage.text}</div> : null}
-
-      <div className="mail-layout">
-        <MailSidebar
-          profile={profile}
-          aliases={aliases}
-          onPasswordUpdate={onPasswordUpdate}
-          passwordBusy={passwordBusy}
-          passwordMessage={passwordMessage}
-        />
-
-        <main className="mail-main">
-          <InboxList items={inboxItems} onSelect={loadMessage} />
-          <MessageViewer message={selectedMessage} />
-          <ComposePanel onSend={onSend} busy={composeBusy} feedback={composeFeedback} />
-        </main>
-      </div>
+      {composeOpen ? (
+        <div className="card compose-drawer">
+          <div className="toolbar"><b>Compose</b><div className="grow" /><button className="ghost small" onClick={() => setComposeOpen(false)}>Close</button></div>
+          <form className="form-row" onSubmit={(e) => {
+            e.preventDefault()
+            const fd = new FormData(e.currentTarget)
+            sendMutation.mutate({
+              account_id: String(fd.get('account_id') || defaultFrom),
+              to: String(fd.get('to') || ''),
+              subject: String(fd.get('subject') || ''),
+              body: String(fd.get('body') || ''),
+            })
+          }}>
+            <select name="account_id" defaultValue={defaultFrom}>{accounts.map((account) => <option key={account.account_id} value={account.account_id}>{account.email}</option>)}</select>
+            <input name="to" placeholder="To" />
+            <input name="subject" placeholder="Subject" />
+            <textarea name="body" rows={7} placeholder="Message body" />
+            <button disabled={sendMutation.isPending}>{sendMutation.isPending ? 'Sending...' : 'Send'}</button>
+          </form>
+        </div>
+      ) : null}
     </div>
   )
 }
 
-createRoot(document.getElementById('root')).render(<MailApp />)
+createRoot(document.getElementById('root')).render(
+  <QueryClientProvider client={queryClient}>
+    <MailApp />
+  </QueryClientProvider>,
+)
