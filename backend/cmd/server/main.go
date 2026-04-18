@@ -2598,6 +2598,10 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "BAD_REQUEST", "invalid message reference")
 			return
 		}
+		if _, err := strconv.Atoi(uid); err != nil {
+			writeErr(w, 400, "BAD_REQUEST", "invalid message reference")
+			return
+		}
 		account, err := s.getWebmailAccount(r.Context(), sess.SessionID, accountID)
 		if err != nil {
 			writeErr(w, 404, "NOT_FOUND", "account not found")
