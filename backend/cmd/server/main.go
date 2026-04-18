@@ -2442,17 +2442,18 @@ func (s *Server) handleMailAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess := Session{Subject: req.Email, Kind: "portal", Workspace: workspaceSlug, SessionID: sid, Exp: time.Now().Add(time.Duration(s.cfg.SessionTTLSeconds) * time.Second).Unix()}
+	s.clearWebmailSessionAccounts(r.Context(), sid)
+	account, err := s.createWebmailAccount(r.Context(), &sess, req.Email, req.Password, hash)
+	if err != nil {
+		s.clearWebmailSessionAccounts(r.Context(), sid)
+		writeErr(w, 500, "INTERNAL_ERROR", err.Error())
+		return
+	}
 	if err := s.setCookie(w, s.cfg.PortalCookieName, sess); err != nil {
 		writeErr(w, 500, "INTERNAL_ERROR", err.Error())
 		return
 	}
 	_, _ = s.setCSRFCookie(w, "portal")
-	s.clearWebmailSessionAccounts(r.Context(), sid)
-	account, err := s.createWebmailAccount(r.Context(), &sess, req.Email, req.Password, hash)
-	if err != nil {
-		writeErr(w, 500, "INTERNAL_ERROR", err.Error())
-		return
-	}
 	writeJSON(w, 200, map[string]any{
 		"ok": true,
 		"session": map[string]any{
