@@ -1767,7 +1767,10 @@ func (s *Server) createWebmailAccount(ctx context.Context, sess *Session, email,
 
 func (s *Server) listWebmailAccounts(ctx context.Context, sessionID string) ([]WebmailAccount, error) {
 	idsRaw, err := s.redisRun(ctx, "SMEMBERS", s.webmailSessionAccountsKey(sessionID))
-	if err != nil || strings.TrimSpace(idsRaw) == "" {
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(idsRaw) == "" {
 		return []WebmailAccount{}, nil
 	}
 	ids := strings.Split(idsRaw, "\n")
