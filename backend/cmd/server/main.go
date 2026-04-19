@@ -39,6 +39,8 @@ type Config struct {
 	AppAddr                    string
 	AppTrustProxy              bool
 	SessionSecret              string
+	WebmailAccountEncKey       string
+	WebmailTokenEncKey         string
 	CookieSecure               bool
 	CookieSameSite             string
 	CookieDomain               string
@@ -167,11 +169,12 @@ type AdminUserRow struct {
 }
 
 type Server struct {
-	cfg           Config
-	logger        *log.Logger
-	mu            sync.Mutex
-	loginAttempts map[string]loginAttempt
-	webmailEncKey [32]byte
+	cfg                 Config
+	logger              *log.Logger
+	mu                  sync.Mutex
+	loginAttempts       map[string]loginAttempt
+	webmailEncKey       [32]byte
+	webmailLegacyEncKey *[32]byte
 }
 
 type loginAttempt struct {
@@ -242,6 +245,8 @@ func loadConfig() (Config, error) {
 		AppAddr:                    env("APP_ADDR", "127.0.0.1:18080"),
 		AppTrustProxy:              envBool("APP_TRUST_PROXY", false),
 		SessionSecret:              os.Getenv("SESSION_SECRET"),
+		WebmailAccountEncKey:       os.Getenv("WEBMAIL_ACCOUNT_ENC_KEY"),
+		WebmailTokenEncKey:         os.Getenv("WEBMAIL_TOKEN_ENC_KEY"),
 		CookieSecure:               envBool("COOKIE_SECURE", true),
 		CookieSameSite:             env("COOKIE_SAMESITE", "Lax"),
 		CookieDomain:               env("COOKIE_DOMAIN", "mail.myupona.com"),
@@ -276,6 +281,9 @@ func loadConfig() (Config, error) {
 	}
 	if cfg.SessionSecret == "" {
 		return cfg, fmt.Errorf("SESSION_SECRET is required")
+	}
+	if strings.TrimSpace(cfg.WebmailAccountEncKey) == "" {
+		return cfg, fmt.Errorf("WEBMAIL_ACCOUNT_ENC_KEY is required")
 	}
 	cfg.RedisNetwork = strings.ToLower(strings.TrimSpace(cfg.RedisNetwork))
 	if cfg.RedisNetwork != "tcp" && cfg.RedisNetwork != "unix" {
@@ -1566,8 +1574,8 @@ func (s *Server) redisRun(ctx context.Context, args ...string) (string, error) {
 	return readRedisResponse(rd)
 }
 
-func (s *Server) encryptWebmailPassword(plain string) (string, error) {
-	block, err := aes.NewCipher(s.webmailEncKey[:])
+func (s *Server) encryptWebmailPasswordWithKey(encKey [32]byte, plain string) (string, error) {
+	block, err := aes.NewCipher(encKey[:])
 	if err != nil {
 		return "", err
 	}
@@ -1583,7 +1591,11 @@ func (s *Server) encryptWebmailPassword(plain string) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(nonce) + "." + base64.RawURLEncoding.EncodeToString(ciphertext), nil
 }
 
-func (s *Server) decryptWebmailPassword(raw string) (string, error) {
+func (s *Server) encryptWebmailPassword(plain string) (string, error) {
+	return s.encryptWebmailPasswordWithKey(s.webmailEncKey, plain)
+}
+
+func (s *Server) decryptWebmailPasswordWithKey(encKey [32]byte, raw string) (string, error) {
 	parts := strings.Split(raw, ".")
 	if len(parts) != 2 {
 		return "", fmt.Errorf("invalid password ciphertext")
@@ -1596,7 +1608,7 @@ func (s *Server) decryptWebmailPassword(raw string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	block, err := aes.NewCipher(s.webmailEncKey[:])
+	block, err := aes.NewCipher(encKey[:])
 	if err != nil {
 		return "", err
 	}
@@ -1609,6 +1621,10 @@ func (s *Server) decryptWebmailPassword(raw string) (string, error) {
 		return "", err
 	}
 	return string(plain), nil
+}
+
+func (s *Server) decryptWebmailPassword(raw string) (string, error) {
+	return s.decryptWebmailPasswordWithKey(s.webmailEncKey, raw)
 }
 
 var errWebmailAccountAlreadyConnected = errors.New("mailbox already connected")
@@ -1662,21 +1678,26 @@ func (s *Server) createWebmailAccount(ctx context.Context, sess *Session, email,
 	sessionAccountsKey := s.webmailSessionAccountsKey(sess.SessionID)
 	sessionAccountKey := s.webmailSessionAccountKey(sess.SessionID, accountID)
 	sessionEmailKey := s.webmailSessionEmailKey(sess.SessionID, email)
-	setResult, err := s.redisRun(ctx, "SET", sessionEmailKey, accountID, "NX", "EX", ttl)
+	mailboxSessionsKey := s.webmailMailboxSessionsKey(email)
+	script := `
+if redis.call("EXISTS", KEYS[1]) == 1 then
+	return "DUPLICATE"
+end
+redis.call("SET", KEYS[2], ARGV[2], "EX", ARGV[1])
+redis.call("SADD", KEYS[3], ARGV[3])
+redis.call("EXPIRE", KEYS[3], ARGV[1])
+redis.call("SET", KEYS[1], ARGV[3], "EX", ARGV[1])
+redis.call("SADD", KEYS[4], ARGV[4])
+redis.call("EXPIRE", KEYS[4], ARGV[1])
+return "OK"
+`
+	result, err := s.redisRun(ctx, "EVAL", script, "4", sessionEmailKey, sessionAccountKey, sessionAccountsKey, mailboxSessionsKey, ttl, string(raw), accountID, sess.SessionID)
 	if err != nil {
 		return WebmailAccount{}, err
 	}
-	if strings.ToUpper(strings.TrimSpace(setResult)) != "OK" {
+	if strings.ToUpper(strings.TrimSpace(result)) != "OK" {
 		return WebmailAccount{}, errWebmailAccountAlreadyConnected
 	}
-	if _, err := s.redisRun(ctx, "SETEX", sessionAccountKey, ttl, string(raw)); err != nil {
-		_, _ = s.redisRun(ctx, "DEL", sessionEmailKey)
-		return WebmailAccount{}, err
-	}
-	_, _ = s.redisRun(ctx, "SADD", sessionAccountsKey, accountID)
-	_, _ = s.redisRun(ctx, "EXPIRE", sessionAccountsKey, ttl)
-	_, _ = s.redisRun(ctx, "SADD", s.webmailMailboxSessionsKey(email), sess.SessionID)
-	_, _ = s.redisRun(ctx, "EXPIRE", s.webmailMailboxSessionsKey(email), ttl)
 	return account, nil
 }
 
@@ -1823,8 +1844,23 @@ func (s *Server) resolveWebmailAccount(ctx context.Context, sess *Session, accou
 	}
 	password, err := s.decryptWebmailPassword(account.PasswordCiphertext)
 	if err != nil {
-		s.removeWebmailAccount(ctx, sess.SessionID, accountID)
-		return WebmailAccount{}, "", fmt.Errorf("mailbox session invalid")
+		if s.webmailLegacyEncKey == nil {
+			s.removeWebmailAccount(ctx, sess.SessionID, accountID)
+			return WebmailAccount{}, "", fmt.Errorf("mailbox session invalid")
+		}
+		legacyPassword, legacyErr := s.decryptWebmailPasswordWithKey(*s.webmailLegacyEncKey, account.PasswordCiphertext)
+		if legacyErr != nil {
+			s.removeWebmailAccount(ctx, sess.SessionID, accountID)
+			return WebmailAccount{}, "", fmt.Errorf("mailbox session invalid")
+		}
+		password = legacyPassword
+		if migratedCiphertext, migrateErr := s.encryptWebmailPassword(password); migrateErr == nil {
+			account.PasswordCiphertext = migratedCiphertext
+			if migratedRaw, marshalErr := json.Marshal(account); marshalErr == nil {
+				ttl := strconv.FormatInt(max(60, s.cfg.WebmailAccountTTLSeconds), 10)
+				_, _ = s.redisRun(ctx, "SETEX", s.webmailSessionAccountKey(sess.SessionID, account.AccountID), ttl, string(migratedRaw))
+			}
+		}
 	}
 	return account, password, nil
 }
@@ -3689,14 +3725,23 @@ func (s *Server) routes() http.Handler {
 	return mux
 }
 
+func webmailEncryptionKey(raw, purpose string) [32]byte {
+	return sha256.Sum256([]byte(strings.TrimSpace(raw) + "|" + purpose))
+}
+
 func main() {
 	logger := log.New(os.Stdout, "[mailadmin] ", log.LstdFlags|log.LUTC)
 	cfg, err := loadConfig()
 	if err != nil {
 		logger.Fatal(err)
 	}
-	encKey := sha256.Sum256([]byte(cfg.SessionSecret + "|webmail-account"))
-	srv := &Server{cfg: cfg, logger: logger, loginAttempts: map[string]loginAttempt{}, webmailEncKey: encKey}
+	encKey := webmailEncryptionKey(cfg.WebmailAccountEncKey, "webmail-account")
+	var legacyEncKey *[32]byte
+	if strings.TrimSpace(cfg.WebmailTokenEncKey) != "" {
+		key := webmailEncryptionKey(cfg.WebmailTokenEncKey, "webmail-account")
+		legacyEncKey = &key
+	}
+	srv := &Server{cfg: cfg, logger: logger, loginAttempts: map[string]loginAttempt{}, webmailEncKey: encKey, webmailLegacyEncKey: legacyEncKey}
 	if err := srv.ensureMetaTables(context.Background()); err != nil {
 		logger.Fatalf("ensure meta tables failed: %v", err)
 	}
