@@ -1826,6 +1826,32 @@ func (s *Server) removeWebmailAccount(ctx context.Context, sessionID, accountID 
 	_, _ = s.redisRun(ctx, "DEL", s.webmailSessionAccountKey(sessionID, accountID))
 }
 
+func (s *Server) revokeWebmailAccountsForMailbox(ctx context.Context, email string) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return
+	}
+	sessionsRaw, err := s.redisRun(ctx, "SMEMBERS", s.webmailMailboxSessionsKey(email))
+	if err == nil && strings.TrimSpace(sessionsRaw) != "" {
+		for _, sidLine := range strings.Split(sessionsRaw, "\n") {
+			sessionID := strings.TrimSpace(sidLine)
+			if sessionID == "" {
+				continue
+			}
+			accounts, listErr := s.listWebmailAccounts(ctx, sessionID)
+			if listErr != nil {
+				continue
+			}
+			for _, account := range accounts {
+				if strings.EqualFold(account.Email, email) {
+					s.removeWebmailAccount(ctx, sessionID, account.AccountID)
+				}
+			}
+		}
+	}
+	_, _ = s.redisRun(ctx, "DEL", s.webmailMailboxSessionsKey(email))
+}
+
 func (s *Server) clearWebmailSessionAccounts(ctx context.Context, sessionID string) {
 	accounts, _ := s.listWebmailAccounts(ctx, sessionID)
 	for _, account := range accounts {
@@ -1843,6 +1869,48 @@ func (s *Server) sanitizeWebmailAccount(account WebmailAccount) map[string]any {
 		"connected":  account.ConnectedAt,
 		"expires_at": account.ExpiresAt,
 	}
+}
+
+func normalizeIMAPFolder(raw string) (string, error) {
+	folder := strings.TrimSpace(raw)
+	if folder == "" {
+		return "", fmt.Errorf("folder is required")
+	}
+	if strings.EqualFold(folder, "INBOX") {
+		return "INBOX", nil
+	}
+	if strings.ContainsAny(folder, "\r\n\"\\") {
+		return "", fmt.Errorf("invalid folder")
+	}
+	if len(folder) > 128 {
+		return "", fmt.Errorf("folder too long")
+	}
+	return folder, nil
+}
+
+func (s *Server) resolveWebmailAccount(ctx context.Context, sess *Session, accountID string) (WebmailAccount, string, error) {
+	account, err := s.getWebmailAccount(ctx, sess.SessionID, accountID)
+	if err != nil {
+		return WebmailAccount{}, "", fmt.Errorf("account not found")
+	}
+	if account.AccountID != accountID || account.Workspace != sess.Workspace {
+		s.removeWebmailAccount(ctx, sess.SessionID, accountID)
+		return WebmailAccount{}, "", fmt.Errorf("mailbox session invalid")
+	}
+	hash, active, found, err := s.mailboxLookup(ctx, account.Email)
+	if err != nil {
+		return WebmailAccount{}, "", err
+	}
+	if !found || !active || hash != account.PasswordHash {
+		s.removeWebmailAccount(ctx, sess.SessionID, accountID)
+		return WebmailAccount{}, "", fmt.Errorf("mailbox session invalid")
+	}
+	password, err := s.decryptWebmailPassword(account.PasswordCiphertext)
+	if err != nil {
+		s.removeWebmailAccount(ctx, sess.SessionID, accountID)
+		return WebmailAccount{}, "", fmt.Errorf("mailbox session invalid")
+	}
+	return account, password, nil
 }
 
 func (s *Server) portalInbox(ctx context.Context, mailboxEmail, password string, limit int) ([]WebmailMessage, error) {
@@ -1920,7 +1988,11 @@ func (s *Server) portalInbox(ctx context.Context, mailboxEmail, password string,
 	return items, nil
 }
 
-func (s *Server) portalMessage(ctx context.Context, mailboxEmail, password, uid string) (map[string]any, error) {
+func (s *Server) portalMessage(ctx context.Context, mailboxEmail, password, folder, uid string) (map[string]any, error) {
+	safeFolder, err := normalizeIMAPFolder(folder)
+	if err != nil {
+		return nil, err
+	}
 	c, err := newIMAPConn(ctx, s.cfg.MailHost, 993)
 	if err != nil {
 		return nil, err
@@ -1930,7 +2002,7 @@ func (s *Server) portalMessage(ctx context.Context, mailboxEmail, password, uid 
 		return nil, err
 	}
 	defer c.run("LOGOUT")
-	if _, err := c.run("SELECT INBOX"); err != nil {
+	if _, err := c.run(fmt.Sprintf("SELECT %q", safeFolder)); err != nil {
 		return nil, err
 	}
 	raw, err := c.run(fmt.Sprintf("UID FETCH %s (UID RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)] BODY.PEEK[TEXT])", strings.TrimSpace(uid)))
@@ -2022,11 +2094,7 @@ func parseIMAPInternalDate(raw string) string {
 	return ts.UTC().Format(time.RFC3339)
 }
 
-func (s *Server) inboxForAccount(ctx context.Context, account WebmailAccount, limit int) ([]InboxItem, error) {
-	password, err := s.decryptWebmailPassword(account.PasswordCiphertext)
-	if err != nil {
-		return nil, err
-	}
+func (s *Server) inboxForAccount(ctx context.Context, account WebmailAccount, password string, limit int) ([]InboxItem, error) {
 	timeout := max(int64(3), s.cfg.WebmailIMAPTimeoutSeconds)
 	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
@@ -2368,6 +2436,7 @@ func (s *Server) handlePortalPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.revokeWebmailTokensForMailbox(r.Context(), sess.Subject)
+	s.revokeWebmailAccountsForMailbox(r.Context(), sess.Subject)
 	if strings.TrimSpace(sess.SessionID) != "" {
 		s.clearWebmailSessionAccounts(r.Context(), sess.SessionID)
 	}
@@ -2588,12 +2657,21 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true})
 		return
 	}
-	if len(parts) == 3 && parts[1] == "password" && r.Method == http.MethodPost {
+	if len(parts) == 2 && parts[1] == "password" && r.Method == http.MethodPost {
 		writeErr(w, 501, "NOT_IMPLEMENTED", "use mailbox settings endpoint")
 		return
 	}
 	if len(parts) >= 5 && parts[1] == "folders" && parts[3] == "messages" && r.Method == http.MethodGet {
-		folder := strings.ToUpper(strings.TrimSpace(parts[2]))
+		folderDecoded, err := url.PathUnescape(parts[2])
+		if err != nil {
+			writeErr(w, 400, "BAD_REQUEST", "invalid folder")
+			return
+		}
+		folder, err := normalizeIMAPFolder(folderDecoded)
+		if err != nil {
+			writeErr(w, 400, "BAD_REQUEST", err.Error())
+			return
+		}
 		uid := strings.TrimSpace(parts[4])
 		if folder == "" || uid == "" {
 			writeErr(w, 400, "BAD_REQUEST", "invalid message reference")
@@ -2603,17 +2681,18 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "BAD_REQUEST", "invalid message reference")
 			return
 		}
-		account, err := s.getWebmailAccount(r.Context(), sess.SessionID, accountID)
+		account, password, err := s.resolveWebmailAccount(r.Context(), sess, accountID)
 		if err != nil {
-			writeErr(w, 404, "NOT_FOUND", "account not found")
+			if err.Error() == "account not found" {
+				writeErr(w, 404, "NOT_FOUND", "account not found")
+			} else if err.Error() == "mailbox session invalid" {
+				writeErr(w, 401, "AUTH_FAILED", err.Error())
+			} else {
+				writeErr(w, 500, "DB_ERROR", err.Error())
+			}
 			return
 		}
-		password, err := s.decryptWebmailPassword(account.PasswordCiphertext)
-		if err != nil {
-			writeErr(w, 401, "AUTH_FAILED", "account credentials expired")
-			return
-		}
-		msg, err := s.portalMessage(r.Context(), account.Email, password, uid)
+		msg, err := s.portalMessage(r.Context(), account.Email, password, folder, uid)
 		if err != nil {
 			writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
 			return
@@ -2665,15 +2744,30 @@ func (s *Server) handleMailInbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	targets := []WebmailAccount{}
+	accountPasswords := map[string]string{}
 	if accountParam == "all" {
-		targets = accounts
-	} else {
 		for _, account := range accounts {
-			if account.AccountID == accountParam {
-				targets = append(targets, account)
-				break
+			resolved, password, err := s.resolveWebmailAccount(r.Context(), sess, account.AccountID)
+			if err != nil {
+				continue
 			}
+			targets = append(targets, resolved)
+			accountPasswords[resolved.AccountID] = password
 		}
+	} else {
+		resolved, password, err := s.resolveWebmailAccount(r.Context(), sess, accountParam)
+		if err != nil {
+			if err.Error() == "account not found" {
+				writeErr(w, 404, "NOT_FOUND", "account not found")
+			} else if err.Error() == "mailbox session invalid" {
+				writeErr(w, 401, "AUTH_FAILED", err.Error())
+			} else {
+				writeErr(w, 500, "DB_ERROR", err.Error())
+			}
+			return
+		}
+		targets = append(targets, resolved)
+		accountPasswords[resolved.AccountID] = password
 	}
 	type inboxResult struct {
 		Account WebmailAccount
@@ -2689,7 +2783,7 @@ func (s *Server) handleMailInbox(w http.ResponseWriter, r *http.Request) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			items, err := s.inboxForAccount(r.Context(), acc, limit)
+			items, err := s.inboxForAccount(r.Context(), acc, accountPasswords[acc.AccountID], limit)
 			results <- inboxResult{Account: acc, Items: items, Err: err}
 		}(account)
 	}
@@ -2738,14 +2832,15 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 429, "RATE_LIMITED", err.Error())
 		return
 	}
-	account, err := s.getWebmailAccount(r.Context(), sess.SessionID, req.AccountID)
+	account, password, err := s.resolveWebmailAccount(r.Context(), sess, req.AccountID)
 	if err != nil {
-		writeErr(w, 404, "NOT_FOUND", "account not found")
-		return
-	}
-	password, err := s.decryptWebmailPassword(account.PasswordCiphertext)
-	if err != nil {
-		writeErr(w, 401, "AUTH_FAILED", "account credentials expired")
+		if err.Error() == "account not found" {
+			writeErr(w, 404, "NOT_FOUND", "account not found")
+		} else if err.Error() == "mailbox session invalid" {
+			writeErr(w, 401, "AUTH_FAILED", err.Error())
+		} else {
+			writeErr(w, 500, "DB_ERROR", err.Error())
+		}
 		return
 	}
 	if err := s.portalSendMail(r.Context(), account.Email, password, req.To, req.Subject, req.Body); err != nil {
@@ -2849,7 +2944,7 @@ func (s *Server) handlePortalWebmailMessage(w http.ResponseWriter, r *http.Reque
 		writeErr(w, 401, "AUTH_FAILED", "invalid webmail token")
 		return
 	}
-	msg, err := s.portalMessage(r.Context(), sess.Subject, password, uid)
+	msg, err := s.portalMessage(r.Context(), sess.Subject, password, "INBOX", uid)
 	if err != nil {
 		writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
 		return
@@ -3469,6 +3564,7 @@ func (s *Server) handleMailboxItem(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case len(parts) == 1 && r.Method == http.MethodDelete:
 		s.revokeWebmailTokensForMailbox(r.Context(), email)
+		s.revokeWebmailAccountsForMailbox(r.Context(), email)
 		if err := s.deleteMailbox(r.Context(), email); err != nil {
 			writeErr(w, 400, "BAD_REQUEST", err.Error())
 			return
@@ -3488,6 +3584,7 @@ func (s *Server) handleMailboxItem(w http.ResponseWriter, r *http.Request) {
 		}
 		if !req.Active {
 			s.revokeWebmailTokensForMailbox(r.Context(), email)
+			s.revokeWebmailAccountsForMailbox(r.Context(), email)
 		}
 		writeJSON(w, 200, map[string]any{"ok": true})
 	case len(parts) == 2 && parts[1] == "password" && r.Method == http.MethodPost:
@@ -3503,6 +3600,7 @@ func (s *Server) handleMailboxItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.revokeWebmailTokensForMailbox(r.Context(), email)
+		s.revokeWebmailAccountsForMailbox(r.Context(), email)
 		writeJSON(w, 200, map[string]any{"ok": true})
 	default:
 		writeErr(w, 404, "NOT_FOUND", "Route not found")
