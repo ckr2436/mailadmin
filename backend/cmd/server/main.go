@@ -64,7 +64,6 @@ type Config struct {
 	RedisAddr                  string
 	RedisPassword              string
 	RedisDB                    int
-	WebmailTokenEncKey         string
 	WebmailAccountTTLSeconds   int64
 	WebmailMaxAccounts         int
 	WebmailInboxLimitDefault   int
@@ -181,15 +180,6 @@ type loginAttempt struct {
 	LockedUntil time.Time
 }
 
-type WebmailToken struct {
-	Token              string `json:"token"`
-	Mailbox            string `json:"mailbox"`
-	Workspace          string `json:"workspace"`
-	PasswordCiphertext string `json:"password_ciphertext"`
-	PasswordHash       string `json:"password_hash"`
-	ExpiresAt          int64  `json:"expires_at"`
-}
-
 type WebmailAccount struct {
 	AccountID          string `json:"account_id"`
 	Email              string `json:"email"`
@@ -277,7 +267,6 @@ func loadConfig() (Config, error) {
 		RedisAddr:                  env("REDIS_ADDR", "127.0.0.1:6379"),
 		RedisPassword:              os.Getenv("REDIS_PASSWORD"),
 		RedisDB:                    int(envInt64("REDIS_DB", 0)),
-		WebmailTokenEncKey:         os.Getenv("WEBMAIL_TOKEN_ENC_KEY"),
 		WebmailAccountTTLSeconds:   envInt64("WEBMAIL_ACCOUNT_TTL_SECONDS", 28800),
 		WebmailMaxAccounts:         int(envInt64("WEBMAIL_MAX_ACCOUNTS_PER_SESSION", 10)),
 		WebmailInboxLimitDefault:   int(envInt64("WEBMAIL_INBOX_LIMIT_DEFAULT", 50)),
@@ -287,9 +276,6 @@ func loadConfig() (Config, error) {
 	}
 	if cfg.SessionSecret == "" {
 		return cfg, fmt.Errorf("SESSION_SECRET is required")
-	}
-	if strings.TrimSpace(cfg.WebmailTokenEncKey) == "" {
-		return cfg, fmt.Errorf("WEBMAIL_TOKEN_ENC_KEY is required")
 	}
 	cfg.RedisNetwork = strings.ToLower(strings.TrimSpace(cfg.RedisNetwork))
 	if cfg.RedisNetwork != "tcp" && cfg.RedisNetwork != "unix" {
@@ -1580,14 +1566,6 @@ func (s *Server) redisRun(ctx context.Context, args ...string) (string, error) {
 	return readRedisResponse(rd)
 }
 
-func (s *Server) webmailTokenKey(token string) string {
-	return "mailadmin:webmail:token:" + token
-}
-
-func (s *Server) webmailMailboxIndexKey(mailbox string) string {
-	return "mailadmin:webmail:mailbox:" + strings.ToLower(strings.TrimSpace(mailbox))
-}
-
 func (s *Server) encryptWebmailPassword(plain string) (string, error) {
 	block, err := aes.NewCipher(s.webmailEncKey[:])
 	if err != nil {
@@ -1633,83 +1611,7 @@ func (s *Server) decryptWebmailPassword(raw string) (string, error) {
 	return string(plain), nil
 }
 
-func (s *Server) issueWebmailToken(ctx context.Context, mailboxEmail, workspace, password, passwordHash string) (string, error) {
-	token, err := randomTokenHex(32)
-	if err != nil {
-		return "", err
-	}
-	ciphertext, err := s.encryptWebmailPassword(password)
-	if err != nil {
-		return "", err
-	}
-	ws := WebmailToken{
-		Token:              token,
-		Mailbox:            mailboxEmail,
-		Workspace:          workspace,
-		PasswordCiphertext: ciphertext,
-		PasswordHash:       passwordHash,
-		ExpiresAt:          time.Now().Add(15 * time.Minute).Unix(),
-	}
-	raw, err := json.Marshal(ws)
-	if err != nil {
-		return "", err
-	}
-	if _, err := s.redisRun(ctx, "SETEX", s.webmailTokenKey(token), "900", string(raw)); err != nil {
-		return "", err
-	}
-	_, _ = s.redisRun(ctx, "SADD", s.webmailMailboxIndexKey(mailboxEmail), token)
-	_, _ = s.redisRun(ctx, "EXPIRE", s.webmailMailboxIndexKey(mailboxEmail), "86400")
-	return token, nil
-}
-func (s *Server) revokeWebmailTokensForMailbox(ctx context.Context, mailbox string) {
-	if strings.TrimSpace(mailbox) == "" {
-		return
-	}
-	indexKey := s.webmailMailboxIndexKey(mailbox)
-	itemsRaw, err := s.redisRun(ctx, "SMEMBERS", indexKey)
-	if err == nil && strings.TrimSpace(itemsRaw) != "" {
-		for _, token := range strings.Split(itemsRaw, "\n") {
-			token = strings.TrimSpace(token)
-			if token == "" {
-				continue
-			}
-			_, _ = s.redisRun(ctx, "DEL", s.webmailTokenKey(token))
-		}
-	}
-	_, _ = s.redisRun(ctx, "DEL", indexKey)
-}
-func (s *Server) resolveWebmailToken(ctx context.Context, sess *Session, token string) (WebmailToken, error) {
-	if strings.TrimSpace(token) == "" {
-		return WebmailToken{}, fmt.Errorf("missing webmail token")
-	}
-	raw, err := s.redisRun(ctx, "GET", s.webmailTokenKey(token))
-	if err != nil || strings.TrimSpace(raw) == "" {
-		return WebmailToken{}, fmt.Errorf("webmail token expired")
-	}
-	var ws WebmailToken
-	if err := json.Unmarshal([]byte(raw), &ws); err != nil || ws.ExpiresAt < time.Now().Unix() {
-		return WebmailToken{}, fmt.Errorf("webmail token expired")
-	}
-	if !strings.EqualFold(ws.Mailbox, sess.Subject) || ws.Workspace != sess.Workspace {
-		return WebmailToken{}, fmt.Errorf("invalid webmail token")
-	}
-	hash, active, found, err := s.mailboxLookup(ctx, sess.Subject)
-	if err != nil {
-		return WebmailToken{}, err
-	}
-	if !found || !active || hash != ws.PasswordHash {
-		s.revokeWebmailTokensForMailbox(ctx, sess.Subject)
-		return WebmailToken{}, fmt.Errorf("mailbox session invalid")
-	}
-	return ws, nil
-}
-func bearerToken(r *http.Request) string {
-	auth := strings.TrimSpace(r.Header.Get("Authorization"))
-	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-		return strings.TrimSpace(auth[7:])
-	}
-	return ""
-}
+var errWebmailAccountAlreadyConnected = errors.New("mailbox already connected")
 
 func (s *Server) webmailSessionAccountsKey(sessionID string) string {
 	return "mailops:webmail:session:" + strings.TrimSpace(sessionID) + ":accounts"
@@ -1717,6 +1619,10 @@ func (s *Server) webmailSessionAccountsKey(sessionID string) string {
 
 func (s *Server) webmailSessionAccountKey(sessionID, accountID string) string {
 	return "mailops:webmail:session:" + strings.TrimSpace(sessionID) + ":account:" + strings.TrimSpace(accountID)
+}
+
+func (s *Server) webmailSessionEmailKey(sessionID, email string) string {
+	return "mailops:webmail:session:" + strings.TrimSpace(sessionID) + ":email:" + strings.ToLower(strings.TrimSpace(email))
 }
 
 func (s *Server) webmailMailboxSessionsKey(email string) string {
@@ -1755,7 +1661,16 @@ func (s *Server) createWebmailAccount(ctx context.Context, sess *Session, email,
 	ttl := strconv.FormatInt(max(60, s.cfg.WebmailAccountTTLSeconds), 10)
 	sessionAccountsKey := s.webmailSessionAccountsKey(sess.SessionID)
 	sessionAccountKey := s.webmailSessionAccountKey(sess.SessionID, accountID)
+	sessionEmailKey := s.webmailSessionEmailKey(sess.SessionID, email)
+	setResult, err := s.redisRun(ctx, "SET", sessionEmailKey, accountID, "NX", "EX", ttl)
+	if err != nil {
+		return WebmailAccount{}, err
+	}
+	if strings.ToUpper(strings.TrimSpace(setResult)) != "OK" {
+		return WebmailAccount{}, errWebmailAccountAlreadyConnected
+	}
 	if _, err := s.redisRun(ctx, "SETEX", sessionAccountKey, ttl, string(raw)); err != nil {
+		_, _ = s.redisRun(ctx, "DEL", sessionEmailKey)
 		return WebmailAccount{}, err
 	}
 	_, _ = s.redisRun(ctx, "SADD", sessionAccountsKey, accountID)
@@ -1821,6 +1736,7 @@ func (s *Server) removeWebmailAccount(ctx context.Context, sessionID, accountID 
 	account, err := s.getWebmailAccount(ctx, sessionID, accountID)
 	if err == nil && strings.TrimSpace(account.Email) != "" {
 		_, _ = s.redisRun(ctx, "SREM", s.webmailMailboxSessionsKey(account.Email), sessionID)
+		_, _ = s.redisRun(ctx, "DEL", s.webmailSessionEmailKey(sessionID, account.Email))
 	}
 	_, _ = s.redisRun(ctx, "SREM", s.webmailSessionAccountsKey(sessionID), accountID)
 	_, _ = s.redisRun(ctx, "DEL", s.webmailSessionAccountKey(sessionID, accountID))
@@ -2372,7 +2288,6 @@ func (s *Server) handlePortalLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if sess, err := s.getSession(r, s.cfg.PortalCookieName, "portal"); err == nil {
-		s.revokeWebmailTokensForMailbox(r.Context(), sess.Subject)
 		if strings.TrimSpace(sess.SessionID) != "" {
 			s.clearWebmailSessionAccounts(r.Context(), sess.SessionID)
 		}
@@ -2468,7 +2383,6 @@ func (s *Server) handlePortalPassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "DB_ERROR", err.Error())
 		return
 	}
-	s.revokeWebmailTokensForMailbox(r.Context(), sess.Subject)
 	s.revokeWebmailAccountsForMailbox(r.Context(), sess.Subject)
 	if strings.TrimSpace(sess.SessionID) != "" {
 		s.clearWebmailSessionAccounts(r.Context(), sess.SessionID)
@@ -2688,6 +2602,10 @@ func (s *Server) handleMailAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 		account, err := s.createWebmailAccount(r.Context(), sess, req.Email, req.Password, hash)
 		if err != nil {
+			if errors.Is(err, errWebmailAccountAlreadyConnected) {
+				writeErr(w, 400, "BAD_REQUEST", "mailbox already connected")
+				return
+			}
 			writeErr(w, 500, "INTERNAL_ERROR", err.Error())
 			return
 		}
@@ -2940,149 +2858,6 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	s.clearLoginFailure(sendKey)
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
-func (s *Server) handlePortalWebmailConnect(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeErr(w, 405, "METHOD_NOT_ALLOWED", "Method not allowed")
-		return
-	}
-	sess := s.requirePortal(w, r)
-	if sess == nil {
-		return
-	}
-	var req struct {
-		Password string `json:"password"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeErr(w, 400, "BAD_REQUEST", "Invalid JSON body")
-		return
-	}
-	hash, active, found, err := s.mailboxLookup(r.Context(), sess.Subject)
-	if err != nil {
-		writeErr(w, 500, "DB_ERROR", err.Error())
-		return
-	}
-	if !found || !active || s.verifyHash(r.Context(), hash, req.Password) != nil {
-		writeErr(w, 401, "AUTH_FAILED", "Invalid credentials")
-		return
-	}
-	token, err := s.issueWebmailToken(r.Context(), sess.Subject, sess.Workspace, req.Password, hash)
-	if err != nil {
-		writeErr(w, 500, "INTERNAL_ERROR", err.Error())
-		return
-	}
-	writeJSON(w, 200, map[string]any{"ok": true, "webmail_token": token, "expires_in": 900})
-}
-func (s *Server) handlePortalWebmailInbox(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeErr(w, 405, "METHOD_NOT_ALLOWED", "Method not allowed")
-		return
-	}
-	sess := s.requirePortal(w, r)
-	if sess == nil {
-		return
-	}
-	ws, err := s.resolveWebmailToken(r.Context(), sess, bearerToken(r))
-	if err != nil {
-		writeErr(w, 401, "AUTH_FAILED", err.Error())
-		return
-	}
-	limit := 20
-	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil {
-			limit = n
-		}
-	}
-	password, err := s.decryptWebmailPassword(ws.PasswordCiphertext)
-	if err != nil {
-		writeErr(w, 401, "AUTH_FAILED", "invalid webmail token")
-		return
-	}
-	items, err := s.portalInbox(r.Context(), sess.Subject, password, limit)
-	if err != nil {
-		writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
-		return
-	}
-	writeJSON(w, 200, map[string]any{"ok": true, "items": items})
-}
-func (s *Server) handlePortalWebmailMessage(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeErr(w, 405, "METHOD_NOT_ALLOWED", "Method not allowed")
-		return
-	}
-	sess := s.requirePortal(w, r)
-	if sess == nil {
-		return
-	}
-	ws, err := s.resolveWebmailToken(r.Context(), sess, bearerToken(r))
-	if err != nil {
-		writeErr(w, 401, "AUTH_FAILED", err.Error())
-		return
-	}
-	parts := strings.Split(trimAnyPrefix(r.URL.Path, "/api/v1/portal/webmail/messages/", "/api/v1/tenants/"+sess.Workspace+"/mail/webmail/messages/"), "/")
-	if len(parts) < 1 || strings.TrimSpace(parts[0]) == "" {
-		writeErr(w, 400, "BAD_REQUEST", "missing message id")
-		return
-	}
-	uid := strings.TrimSpace(parts[0])
-	if uid == "" || !regexp.MustCompile(`^[0-9]+$`).MatchString(uid) {
-		writeErr(w, 400, "BAD_REQUEST", "invalid message id")
-		return
-	}
-	password, err := s.decryptWebmailPassword(ws.PasswordCiphertext)
-	if err != nil {
-		writeErr(w, 401, "AUTH_FAILED", "invalid webmail token")
-		return
-	}
-	msg, err := s.portalMessage(r.Context(), sess.Subject, password, "INBOX", uid)
-	if err != nil {
-		writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
-		return
-	}
-	writeJSON(w, 200, map[string]any{"ok": true, "item": msg})
-}
-func (s *Server) handlePortalWebmailSend(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeErr(w, 405, "METHOD_NOT_ALLOWED", "Method not allowed")
-		return
-	}
-	sess := s.requirePortal(w, r)
-	if sess == nil {
-		return
-	}
-	ws, err := s.resolveWebmailToken(r.Context(), sess, bearerToken(r))
-	if err != nil {
-		writeErr(w, 401, "AUTH_FAILED", err.Error())
-		return
-	}
-	var req struct {
-		To      string `json:"to"`
-		Subject string `json:"subject"`
-		Body    string `json:"body"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeErr(w, 400, "BAD_REQUEST", "Invalid JSON body")
-		return
-	}
-	if strings.TrimSpace(req.To) == "" {
-		writeErr(w, 400, "BAD_REQUEST", "Recipient is required")
-		return
-	}
-	if len(strings.TrimSpace(req.Body)) == 0 {
-		writeErr(w, 400, "BAD_REQUEST", "Body is required")
-		return
-	}
-	password, err := s.decryptWebmailPassword(ws.PasswordCiphertext)
-	if err != nil {
-		writeErr(w, 401, "AUTH_FAILED", "invalid webmail token")
-		return
-	}
-	if err := s.portalSendMail(r.Context(), sess.Subject, password, req.To, req.Subject, req.Body); err != nil {
-		writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
-		return
-	}
-	s.audit(r.Context(), "mailbox", sess.Subject, "portal.webmail_send", req.To, `{}`)
-	writeJSON(w, 200, map[string]any{"ok": true})
-}
 func (s *Server) routeTenants(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/v1/tenants" {
 		if r.Method != http.MethodGet {
@@ -3123,21 +2898,7 @@ func (s *Server) routeTenants(w http.ResponseWriter, r *http.Request) {
 		s.handlePortalAliases(w, r)
 	case "account/password":
 		s.handlePortalPassword(w, r)
-	case "webmail/connect":
-		s.handlePortalWebmailConnect(w, r)
-	case "webmail/inbox":
-		s.handlePortalWebmailInbox(w, r)
-	case "webmail/send":
-		s.handlePortalWebmailSend(w, r)
-	case "webmail/messages":
-		writeErr(w, 400, "BAD_REQUEST", "missing message id")
-	case "webmail/messages/":
-		writeErr(w, 400, "BAD_REQUEST", "missing message id")
 	default:
-		if strings.HasPrefix(action, "webmail/messages/") {
-			s.handlePortalWebmailMessage(w, r)
-			return
-		}
 		writeErr(w, 404, "NOT_FOUND", "Route not found")
 	}
 }
@@ -3652,7 +3413,6 @@ func (s *Server) handleMailboxItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case len(parts) == 1 && r.Method == http.MethodDelete:
-		s.revokeWebmailTokensForMailbox(r.Context(), email)
 		s.revokeWebmailAccountsForMailbox(r.Context(), email)
 		if err := s.deleteMailbox(r.Context(), email); err != nil {
 			writeErr(w, 400, "BAD_REQUEST", err.Error())
@@ -3672,7 +3432,6 @@ func (s *Server) handleMailboxItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !req.Active {
-			s.revokeWebmailTokensForMailbox(r.Context(), email)
 			s.revokeWebmailAccountsForMailbox(r.Context(), email)
 		}
 		writeJSON(w, 200, map[string]any{"ok": true})
@@ -3688,7 +3447,6 @@ func (s *Server) handleMailboxItem(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 500, "DB_ERROR", err.Error())
 			return
 		}
-		s.revokeWebmailTokensForMailbox(r.Context(), email)
 		s.revokeWebmailAccountsForMailbox(r.Context(), email)
 		writeJSON(w, 200, map[string]any{"ok": true})
 	default:
@@ -3922,10 +3680,6 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/v1/portal/account/profile", s.handlePortalProfile)
 	mux.HandleFunc("/api/v1/portal/account/aliases", s.handlePortalAliases)
 	mux.HandleFunc("/api/v1/portal/account/password", s.handlePortalPassword)
-	mux.HandleFunc("/api/v1/portal/webmail/connect", s.handlePortalWebmailConnect)
-	mux.HandleFunc("/api/v1/portal/webmail/inbox", s.handlePortalWebmailInbox)
-	mux.HandleFunc("/api/v1/portal/webmail/send", s.handlePortalWebmailSend)
-	mux.HandleFunc("/api/v1/portal/webmail/messages/", s.handlePortalWebmailMessage)
 	mux.HandleFunc("/api/v1/admin/domains", s.handleDomains)
 	mux.HandleFunc("/api/v1/admin/domains/", s.handleDomainItem)
 	mux.HandleFunc("/api/v1/admin/mailboxes", s.handleMailboxes)
@@ -3941,7 +3695,7 @@ func main() {
 	if err != nil {
 		logger.Fatal(err)
 	}
-	encKey := sha256.Sum256([]byte(cfg.WebmailTokenEncKey))
+	encKey := sha256.Sum256([]byte(cfg.SessionSecret + "|webmail-account"))
 	srv := &Server{cfg: cfg, logger: logger, loginAttempts: map[string]loginAttempt{}, webmailEncKey: encKey}
 	if err := srv.ensureMetaTables(context.Background()); err != nil {
 		logger.Fatalf("ensure meta tables failed: %v", err)
