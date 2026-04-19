@@ -1669,10 +1669,24 @@ func (s *Server) createWebmailAccount(ctx context.Context, sess *Session, email,
 	sessionAccountKey := s.webmailSessionAccountKey(sess.SessionID, accountID)
 	sessionEmailKey := s.webmailSessionEmailKey(sess.SessionID, email)
 	mailboxSessionsKey := s.webmailMailboxSessionsKey(email)
+	accountKeyPrefix := "mailops:webmail:session:" + strings.TrimSpace(sess.SessionID) + ":account:"
 	script := `
 local max_accounts = tonumber(ARGV[5])
-local current_count = redis.call("SCARD", KEYS[3])
-if current_count >= max_accounts then
+local account_key_prefix = ARGV[6]
+
+local ids = redis.call("SMEMBERS", KEYS[3])
+local active_count = 0
+
+for _, id in ipairs(ids) do
+  local account_key = account_key_prefix .. id
+  if redis.call("EXISTS", account_key) == 1 then
+    active_count = active_count + 1
+  else
+    redis.call("SREM", KEYS[3], id)
+  end
+end
+
+if active_count >= max_accounts then
   return "LIMIT"
 end
 
@@ -1703,6 +1717,7 @@ return "OK"
 		accountID,
 		sess.SessionID,
 		strconv.Itoa(max(1, s.cfg.WebmailMaxAccounts)),
+		accountKeyPrefix,
 	)
 	if err != nil {
 		return WebmailAccount{}, err
@@ -1736,13 +1751,18 @@ func (s *Server) listWebmailAccounts(ctx context.Context, sessionID string) ([]W
 		}
 		raw, err := s.redisRun(ctx, "GET", s.webmailSessionAccountKey(sessionID, accountID))
 		if err != nil || strings.TrimSpace(raw) == "" {
+			_, _ = s.redisRun(ctx, "SREM", s.webmailSessionAccountsKey(sessionID), accountID)
 			continue
 		}
 		var item WebmailAccount
 		if json.Unmarshal([]byte(raw), &item) != nil {
+			_, _ = s.redisRun(ctx, "SREM", s.webmailSessionAccountsKey(sessionID), accountID)
+			_, _ = s.redisRun(ctx, "DEL", s.webmailSessionAccountKey(sessionID, accountID))
 			continue
 		}
 		if item.AccountID == "" {
+			_, _ = s.redisRun(ctx, "SREM", s.webmailSessionAccountsKey(sessionID), accountID)
+			_, _ = s.redisRun(ctx, "DEL", s.webmailSessionAccountKey(sessionID, accountID))
 			continue
 		}
 		items = append(items, item)
