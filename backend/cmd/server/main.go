@@ -1749,20 +1749,24 @@ func (s *Server) listWebmailAccounts(ctx context.Context, sessionID string) ([]W
 		if accountID == "" {
 			continue
 		}
-		raw, err := s.redisRun(ctx, "GET", s.webmailSessionAccountKey(sessionID, accountID))
-		if err != nil || strings.TrimSpace(raw) == "" {
+		accountKey := s.webmailSessionAccountKey(sessionID, accountID)
+		raw, err := s.redisRun(ctx, "GET", accountKey)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(raw) == "" {
 			_, _ = s.redisRun(ctx, "SREM", s.webmailSessionAccountsKey(sessionID), accountID)
 			continue
 		}
 		var item WebmailAccount
 		if json.Unmarshal([]byte(raw), &item) != nil {
 			_, _ = s.redisRun(ctx, "SREM", s.webmailSessionAccountsKey(sessionID), accountID)
-			_, _ = s.redisRun(ctx, "DEL", s.webmailSessionAccountKey(sessionID, accountID))
+			_, _ = s.redisRun(ctx, "DEL", accountKey)
 			continue
 		}
-		if item.AccountID == "" {
+		if item.AccountID == "" || item.AccountID != accountID {
 			_, _ = s.redisRun(ctx, "SREM", s.webmailSessionAccountsKey(sessionID), accountID)
-			_, _ = s.redisRun(ctx, "DEL", s.webmailSessionAccountKey(sessionID, accountID))
+			_, _ = s.redisRun(ctx, "DEL", accountKey)
 			continue
 		}
 		items = append(items, item)
