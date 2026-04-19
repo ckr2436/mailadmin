@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { logoutPortal } from '../shared/auth'
@@ -66,18 +66,19 @@ function MailApp() {
   })
 
   const authError = sessionQuery.error?.status === 401 || accountsQuery.error?.status === 401
-  if (authError) {
-    handleSessionExpired()
-    return null
-  }
-
   const accounts = accountsQuery.data?.accounts || accountsQuery.data?.items || []
   const inboxItems = inboxQuery.data?.items || []
-  const defaultFrom = useMemo(() => {
-    if (!accounts.length) return ''
-    if (activeAccountId === 'all') return accounts[0].account_id
-    return activeAccountId
-  }, [activeAccountId, accounts])
+  const defaultFrom = accounts.length
+    ? activeAccountId === 'all' ? accounts[0].account_id : activeAccountId
+    : ''
+
+  useEffect(() => {
+    if (authError) handleSessionExpired()
+  }, [authError])
+
+  if (authError) {
+    return null
+  }
 
   return (
     <div className="webmail-app">

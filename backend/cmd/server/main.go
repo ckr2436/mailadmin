@@ -1913,6 +1913,22 @@ func (s *Server) resolveWebmailAccount(ctx context.Context, sess *Session, accou
 	return account, password, nil
 }
 
+func (s *Server) validateWebmailAccountState(ctx context.Context, sess *Session, account WebmailAccount) bool {
+	if account.AccountID == "" || account.Workspace != sess.Workspace {
+		s.removeWebmailAccount(ctx, sess.SessionID, account.AccountID)
+		return false
+	}
+	hash, active, found, err := s.mailboxLookup(ctx, account.Email)
+	if err != nil {
+		return false
+	}
+	if !found || !active || hash != account.PasswordHash {
+		s.removeWebmailAccount(ctx, sess.SessionID, account.AccountID)
+		return false
+	}
+	return true
+}
+
 func (s *Server) portalInbox(ctx context.Context, mailboxEmail, password string, limit int) ([]WebmailMessage, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 20
@@ -2010,6 +2026,9 @@ func (s *Server) portalMessage(ctx context.Context, mailboxEmail, password, fold
 		return nil, err
 	}
 	literals := extractLiterals(raw)
+	if !regexp.MustCompile(`UID\s+([0-9]+)`).MatchString(raw) || len(literals) == 0 {
+		return nil, fmt.Errorf("message not found")
+	}
 	headers := map[string]string{}
 	body := ""
 	if len(literals) > 0 {
@@ -2072,7 +2091,7 @@ func (s *Server) portalSendMail(ctx context.Context, mailboxEmail, password, to,
 		return err
 	}
 	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s\r\n",
-		mailboxEmail, strings.Join(rcpts, ", "), strings.TrimSpace(subject), time.Now().Format(time.RFC1123Z), body)
+		mailboxEmail, strings.Join(rcpts, ", "), sanitizeMailHeader(subject), time.Now().Format(time.RFC1123Z), body)
 	if _, err := io.WriteString(w, msg); err != nil {
 		return err
 	}
@@ -2080,6 +2099,12 @@ func (s *Server) portalSendMail(ctx context.Context, mailboxEmail, password, to,
 		return err
 	}
 	return c.Quit()
+}
+
+func sanitizeMailHeader(v string) string {
+	v = strings.ReplaceAll(v, "\r", " ")
+	v = strings.ReplaceAll(v, "\n", " ")
+	return strings.TrimSpace(v)
 }
 
 func parseIMAPInternalDate(raw string) string {
@@ -2554,6 +2579,9 @@ func (s *Server) handleMailAuthSession(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]any, 0, len(accounts))
 	for _, account := range accounts {
+		if !s.validateWebmailAccountState(r.Context(), sess, account) {
+			continue
+		}
 		items = append(items, s.sanitizeWebmailAccount(account))
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "session": map[string]any{"primary_email": sess.Subject, "workspace": sess.Workspace, "session_id": sess.SessionID}, "accounts": items})
@@ -2577,6 +2605,9 @@ func (s *Server) handleMailAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 		items := make([]any, 0, len(accounts))
 		for _, account := range accounts {
+			if !s.validateWebmailAccountState(r.Context(), sess, account) {
+				continue
+			}
 			items = append(items, s.sanitizeWebmailAccount(account))
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "items": items})
@@ -2670,7 +2701,7 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 501, "NOT_IMPLEMENTED", "use mailbox settings endpoint")
 		return
 	}
-	if len(parts) >= 5 && parts[1] == "folders" && parts[3] == "messages" && r.Method == http.MethodGet {
+	if len(parts) == 5 && parts[1] == "folders" && parts[3] == "messages" && r.Method == http.MethodGet {
 		folder, err := normalizeIMAPFolder(parts[2])
 		if err != nil {
 			writeErr(w, 400, "BAD_REQUEST", err.Error())
@@ -2698,6 +2729,10 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 		}
 		msg, err := s.portalMessage(r.Context(), account.Email, password, folder, uid)
 		if err != nil {
+			if err.Error() == "message not found" {
+				writeErr(w, 404, "NOT_FOUND", "message not found")
+				return
+			}
 			writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
 			return
 		}
