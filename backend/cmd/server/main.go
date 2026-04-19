@@ -1913,20 +1913,28 @@ func (s *Server) resolveWebmailAccount(ctx context.Context, sess *Session, accou
 	return account, password, nil
 }
 
-func (s *Server) validateWebmailAccountState(ctx context.Context, sess *Session, account WebmailAccount) bool {
+type webmailAccountState int
+
+const (
+	webmailAccountValid webmailAccountState = iota
+	webmailAccountInvalid
+	webmailAccountLookupError
+)
+
+func (s *Server) validateWebmailAccountState(ctx context.Context, sess *Session, account WebmailAccount) (webmailAccountState, error) {
 	if account.AccountID == "" || account.Workspace != sess.Workspace {
 		s.removeWebmailAccount(ctx, sess.SessionID, account.AccountID)
-		return false
+		return webmailAccountInvalid, nil
 	}
 	hash, active, found, err := s.mailboxLookup(ctx, account.Email)
 	if err != nil {
-		return false
+		return webmailAccountLookupError, err
 	}
 	if !found || !active || hash != account.PasswordHash {
 		s.removeWebmailAccount(ctx, sess.SessionID, account.AccountID)
-		return false
+		return webmailAccountInvalid, nil
 	}
-	return true
+	return webmailAccountValid, nil
 }
 
 func (s *Server) portalInbox(ctx context.Context, mailboxEmail, password string, limit int) ([]WebmailMessage, error) {
@@ -2579,7 +2587,12 @@ func (s *Server) handleMailAuthSession(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]any, 0, len(accounts))
 	for _, account := range accounts {
-		if !s.validateWebmailAccountState(r.Context(), sess, account) {
+		state, err := s.validateWebmailAccountState(r.Context(), sess, account)
+		if err != nil {
+			writeErr(w, 503, "MAILBOX_LOOKUP_UNAVAILABLE", "Mailbox state temporarily unavailable, please retry")
+			return
+		}
+		if state == webmailAccountInvalid {
 			continue
 		}
 		items = append(items, s.sanitizeWebmailAccount(account))
@@ -2605,7 +2618,12 @@ func (s *Server) handleMailAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 		items := make([]any, 0, len(accounts))
 		for _, account := range accounts {
-			if !s.validateWebmailAccountState(r.Context(), sess, account) {
+			state, err := s.validateWebmailAccountState(r.Context(), sess, account)
+			if err != nil {
+				writeErr(w, 503, "MAILBOX_LOOKUP_UNAVAILABLE", "Mailbox state temporarily unavailable, please retry")
+				return
+			}
+			if state == webmailAccountInvalid {
 				continue
 			}
 			items = append(items, s.sanitizeWebmailAccount(account))
@@ -2618,10 +2636,19 @@ func (s *Server) handleMailAccounts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.Email = strings.ToLower(strings.TrimSpace(req.Email))
-		accounts, _ := s.listWebmailAccounts(r.Context(), sess.SessionID)
+		accounts, err := s.listWebmailAccounts(r.Context(), sess.SessionID)
+		if err != nil {
+			writeErr(w, 500, "INTERNAL_ERROR", err.Error())
+			return
+		}
 		activeAccounts := make([]WebmailAccount, 0, len(accounts))
 		for _, account := range accounts {
-			if !s.validateWebmailAccountState(r.Context(), sess, account) {
+			state, err := s.validateWebmailAccountState(r.Context(), sess, account)
+			if err != nil {
+				writeErr(w, 503, "MAILBOX_LOOKUP_UNAVAILABLE", "Mailbox state temporarily unavailable, please retry")
+				return
+			}
+			if state == webmailAccountInvalid {
 				continue
 			}
 			activeAccounts = append(activeAccounts, account)
