@@ -1,17 +1,8 @@
 const KEY = {
-  WEBMAIL_TOKEN: 'mail.webmailToken',
   MAILBOX_EMAIL: 'mail.mailboxEmail',
   WORKSPACE_SLUG: 'mail.workspaceSlug',
   WORKSPACE_DOMAIN: 'mail.workspaceDomain',
   WORKSPACE_BY_DOMAIN: 'mail.workspaceByDomain',
-}
-
-export function getWebmailToken() {
-  return sessionStorage.getItem(KEY.WEBMAIL_TOKEN) || ''
-}
-
-export function setWebmailToken(token) {
-  sessionStorage.setItem(KEY.WEBMAIL_TOKEN, token)
 }
 
 export function clearPortalSession() {

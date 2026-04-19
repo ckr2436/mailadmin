@@ -65,12 +65,19 @@ type Config struct {
 	RedisPassword              string
 	RedisDB                    int
 	WebmailTokenEncKey         string
+	WebmailAccountTTLSeconds   int64
+	WebmailMaxAccounts         int
+	WebmailInboxLimitDefault   int
+	WebmailInboxLimitMax       int
+	WebmailIMAPTimeoutSeconds  int64
+	WebmailAllInboxConcurrency int
 }
 
 type Session struct {
 	Subject   string `json:"sub"`
 	Kind      string `json:"kind"`
 	Workspace string `json:"ws,omitempty"`
+	SessionID string `json:"sid,omitempty"`
 	Version   int64  `json:"ver,omitempty"`
 	Role      string `json:"role,omitempty"`
 	Exp       int64  `json:"exp"`
@@ -183,6 +190,32 @@ type WebmailToken struct {
 	ExpiresAt          int64  `json:"expires_at"`
 }
 
+type WebmailAccount struct {
+	AccountID          string `json:"account_id"`
+	Email              string `json:"email"`
+	Workspace          string `json:"workspace"`
+	Domain             string `json:"domain"`
+	PasswordCiphertext string `json:"password_ciphertext"`
+	PasswordHash       string `json:"password_hash"`
+	ConnectedAt        int64  `json:"connected_at"`
+	ExpiresAt          int64  `json:"expires_at"`
+}
+
+type InboxItem struct {
+	MessageID    string `json:"message_id"`
+	AccountID    string `json:"account_id"`
+	AccountEmail string `json:"account_email"`
+	Folder       string `json:"folder"`
+	UID          string `json:"uid"`
+	From         string `json:"from,omitempty"`
+	To           string `json:"to,omitempty"`
+	Subject      string `json:"subject,omitempty"`
+	Date         string `json:"date,omitempty"`
+	InternalDate string `json:"internal_date,omitempty"`
+	Preview      string `json:"preview,omitempty"`
+	Size         int64  `json:"size,omitempty"`
+}
+
 var (
 	domainRe    = regexp.MustCompile(`^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
 	localpartRe = regexp.MustCompile(`^[A-Za-z0-9._%+\-]+$`)
@@ -245,6 +278,12 @@ func loadConfig() (Config, error) {
 		RedisPassword:              os.Getenv("REDIS_PASSWORD"),
 		RedisDB:                    int(envInt64("REDIS_DB", 0)),
 		WebmailTokenEncKey:         os.Getenv("WEBMAIL_TOKEN_ENC_KEY"),
+		WebmailAccountTTLSeconds:   envInt64("WEBMAIL_ACCOUNT_TTL_SECONDS", 28800),
+		WebmailMaxAccounts:         int(envInt64("WEBMAIL_MAX_ACCOUNTS_PER_SESSION", 10)),
+		WebmailInboxLimitDefault:   int(envInt64("WEBMAIL_INBOX_LIMIT_DEFAULT", 50)),
+		WebmailInboxLimitMax:       int(envInt64("WEBMAIL_INBOX_LIMIT_MAX", 100)),
+		WebmailIMAPTimeoutSeconds:  envInt64("WEBMAIL_IMAP_TIMEOUT_SECONDS", 10),
+		WebmailAllInboxConcurrency: int(envInt64("WEBMAIL_ALL_INBOX_CONCURRENCY", 5)),
 	}
 	if cfg.SessionSecret == "" {
 		return cfg, fmt.Errorf("SESSION_SECRET is required")
@@ -1672,6 +1711,140 @@ func bearerToken(r *http.Request) string {
 	return ""
 }
 
+func (s *Server) webmailSessionAccountsKey(sessionID string) string {
+	return "mailops:webmail:session:" + strings.TrimSpace(sessionID) + ":accounts"
+}
+
+func (s *Server) webmailSessionAccountKey(sessionID, accountID string) string {
+	return "mailops:webmail:session:" + strings.TrimSpace(sessionID) + ":account:" + strings.TrimSpace(accountID)
+}
+
+func (s *Server) webmailMailboxSessionsKey(email string) string {
+	return "mailops:webmail:mailbox:" + strings.ToLower(strings.TrimSpace(email)) + ":sessions"
+}
+
+func (s *Server) createWebmailAccount(ctx context.Context, sess *Session, email, password, passwordHash string) (WebmailAccount, error) {
+	accountIDToken, err := randomTokenHex(8)
+	if err != nil {
+		return WebmailAccount{}, err
+	}
+	accountID := "acc_" + accountIDToken
+	ciphertext, err := s.encryptWebmailPassword(password)
+	if err != nil {
+		return WebmailAccount{}, err
+	}
+	domain := ""
+	if at := strings.LastIndex(email, "@"); at > 0 {
+		domain = strings.ToLower(strings.TrimSpace(email[at+1:]))
+	}
+	exp := time.Now().Add(time.Duration(s.cfg.WebmailAccountTTLSeconds) * time.Second).Unix()
+	account := WebmailAccount{
+		AccountID:          accountID,
+		Email:              strings.ToLower(strings.TrimSpace(email)),
+		Workspace:          sess.Workspace,
+		Domain:             domain,
+		PasswordCiphertext: ciphertext,
+		PasswordHash:       passwordHash,
+		ConnectedAt:        time.Now().Unix(),
+		ExpiresAt:          exp,
+	}
+	raw, err := json.Marshal(account)
+	if err != nil {
+		return WebmailAccount{}, err
+	}
+	ttl := strconv.FormatInt(max(60, s.cfg.WebmailAccountTTLSeconds), 10)
+	sessionAccountsKey := s.webmailSessionAccountsKey(sess.SessionID)
+	sessionAccountKey := s.webmailSessionAccountKey(sess.SessionID, accountID)
+	if _, err := s.redisRun(ctx, "SETEX", sessionAccountKey, ttl, string(raw)); err != nil {
+		return WebmailAccount{}, err
+	}
+	_, _ = s.redisRun(ctx, "SADD", sessionAccountsKey, accountID)
+	_, _ = s.redisRun(ctx, "EXPIRE", sessionAccountsKey, ttl)
+	_, _ = s.redisRun(ctx, "SADD", s.webmailMailboxSessionsKey(email), sess.SessionID)
+	_, _ = s.redisRun(ctx, "EXPIRE", s.webmailMailboxSessionsKey(email), ttl)
+	return account, nil
+}
+
+func (s *Server) listWebmailAccounts(ctx context.Context, sessionID string) ([]WebmailAccount, error) {
+	idsRaw, err := s.redisRun(ctx, "SMEMBERS", s.webmailSessionAccountsKey(sessionID))
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(idsRaw) == "" {
+		return []WebmailAccount{}, nil
+	}
+	ids := strings.Split(idsRaw, "\n")
+	items := make([]WebmailAccount, 0, len(ids))
+	for _, id := range ids {
+		accountID := strings.TrimSpace(id)
+		if accountID == "" {
+			continue
+		}
+		raw, err := s.redisRun(ctx, "GET", s.webmailSessionAccountKey(sessionID, accountID))
+		if err != nil || strings.TrimSpace(raw) == "" {
+			continue
+		}
+		var item WebmailAccount
+		if json.Unmarshal([]byte(raw), &item) != nil {
+			continue
+		}
+		if item.AccountID == "" {
+			continue
+		}
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].ConnectedAt == items[j].ConnectedAt {
+			return items[i].Email < items[j].Email
+		}
+		return items[i].ConnectedAt < items[j].ConnectedAt
+	})
+	return items, nil
+}
+
+func (s *Server) getWebmailAccount(ctx context.Context, sessionID, accountID string) (WebmailAccount, error) {
+	raw, err := s.redisRun(ctx, "GET", s.webmailSessionAccountKey(sessionID, accountID))
+	if err != nil || strings.TrimSpace(raw) == "" {
+		return WebmailAccount{}, fmt.Errorf("account not found")
+	}
+	var account WebmailAccount
+	if err := json.Unmarshal([]byte(raw), &account); err != nil {
+		return WebmailAccount{}, err
+	}
+	if account.AccountID == "" {
+		return WebmailAccount{}, fmt.Errorf("account not found")
+	}
+	return account, nil
+}
+
+func (s *Server) removeWebmailAccount(ctx context.Context, sessionID, accountID string) {
+	account, err := s.getWebmailAccount(ctx, sessionID, accountID)
+	if err == nil && strings.TrimSpace(account.Email) != "" {
+		_, _ = s.redisRun(ctx, "SREM", s.webmailMailboxSessionsKey(account.Email), sessionID)
+	}
+	_, _ = s.redisRun(ctx, "SREM", s.webmailSessionAccountsKey(sessionID), accountID)
+	_, _ = s.redisRun(ctx, "DEL", s.webmailSessionAccountKey(sessionID, accountID))
+}
+
+func (s *Server) clearWebmailSessionAccounts(ctx context.Context, sessionID string) {
+	accounts, _ := s.listWebmailAccounts(ctx, sessionID)
+	for _, account := range accounts {
+		s.removeWebmailAccount(ctx, sessionID, account.AccountID)
+	}
+	_, _ = s.redisRun(ctx, "DEL", s.webmailSessionAccountsKey(sessionID))
+}
+
+func (s *Server) sanitizeWebmailAccount(account WebmailAccount) map[string]any {
+	return map[string]any{
+		"account_id": account.AccountID,
+		"email":      account.Email,
+		"workspace":  account.Workspace,
+		"domain":     account.Domain,
+		"connected":  account.ConnectedAt,
+		"expires_at": account.ExpiresAt,
+	}
+}
+
 func (s *Server) portalInbox(ctx context.Context, mailboxEmail, password string, limit int) ([]WebmailMessage, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 20
@@ -1837,6 +2010,109 @@ func (s *Server) portalSendMail(ctx context.Context, mailboxEmail, password, to,
 	return c.Quit()
 }
 
+func parseIMAPInternalDate(raw string) string {
+	m := regexp.MustCompile(`INTERNALDATE\s+"([^"]+)"`).FindStringSubmatch(raw)
+	if len(m) < 2 {
+		return ""
+	}
+	ts, err := time.Parse("_2-Jan-2006 15:04:05 -0700", m[1])
+	if err != nil {
+		return ""
+	}
+	return ts.UTC().Format(time.RFC3339)
+}
+
+func (s *Server) inboxForAccount(ctx context.Context, account WebmailAccount, limit int) ([]InboxItem, error) {
+	password, err := s.decryptWebmailPassword(account.PasswordCiphertext)
+	if err != nil {
+		return nil, err
+	}
+	timeout := max(int64(3), s.cfg.WebmailIMAPTimeoutSeconds)
+	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	defer cancel()
+	c, err := newIMAPConn(cctx, s.cfg.MailHost, 993)
+	if err != nil {
+		return nil, err
+	}
+	defer c.close()
+	if _, err := c.run(fmt.Sprintf(`LOGIN %q %q`, account.Email, password)); err != nil {
+		return nil, err
+	}
+	defer c.run("LOGOUT")
+	if _, err := c.run("SELECT INBOX"); err != nil {
+		return nil, err
+	}
+	searchRaw, err := c.run("UID SEARCH ALL")
+	if err != nil {
+		return nil, err
+	}
+	uids := []int{}
+	for _, line := range splitLines(strings.ReplaceAll(searchRaw, "\r", "")) {
+		if !strings.HasPrefix(line, "* SEARCH") {
+			continue
+		}
+		parts := strings.Fields(strings.TrimPrefix(line, "* SEARCH"))
+		for _, p := range parts {
+			n, convErr := strconv.Atoi(strings.TrimSpace(p))
+			if convErr == nil && n > 0 {
+				uids = append(uids, n)
+			}
+		}
+	}
+	if len(uids) == 0 {
+		return []InboxItem{}, nil
+	}
+	sort.Ints(uids)
+	start := 0
+	if len(uids) > limit {
+		start = len(uids) - limit
+	}
+	selected := uids[start:]
+	for i, j := 0, len(selected)-1; i < j; i, j = i+1, j-1 {
+		selected[i], selected[j] = selected[j], selected[i]
+	}
+	items := make([]InboxItem, 0, len(selected))
+	for _, uid := range selected {
+		raw, fetchErr := c.run(fmt.Sprintf("UID FETCH %d (UID RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)] BODY.PEEK[TEXT])", uid))
+		if fetchErr != nil {
+			continue
+		}
+		literals := extractLiterals(raw)
+		headers := map[string]string{}
+		preview := ""
+		if len(literals) > 0 {
+			headers = parseHeaderBlock(literals[0])
+		}
+		if len(literals) > 1 {
+			preview = normalizePreview(string(literals[1]), 180)
+		}
+		uidText := strconv.Itoa(uid)
+		if m := regexp.MustCompile(`UID\s+([0-9]+)`).FindStringSubmatch(raw); len(m) > 1 {
+			uidText = strings.TrimSpace(m[1])
+		}
+		size := int64(0)
+		if m := regexp.MustCompile(`RFC822\.SIZE\s+([0-9]+)`).FindStringSubmatch(raw); len(m) > 1 {
+			size, _ = strconv.ParseInt(m[1], 10, 64)
+		}
+		internalDate := parseIMAPInternalDate(raw)
+		items = append(items, InboxItem{
+			MessageID:    account.AccountID + ":INBOX:" + uidText,
+			AccountID:    account.AccountID,
+			AccountEmail: account.Email,
+			Folder:       "INBOX",
+			UID:          uidText,
+			From:         headers["from"],
+			To:           headers["to"],
+			Subject:      headers["subject"],
+			Date:         headers["date"],
+			InternalDate: internalDate,
+			Preview:      preview,
+			Size:         size,
+		})
+	}
+	return items, nil
+}
+
 // handlers
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -1983,7 +2259,8 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.clearLoginFailure(loginKey)
-	_ = s.setCookie(w, s.cfg.PortalCookieName, Session{Subject: req.Email, Kind: "portal", Workspace: workspaceSlug, Exp: time.Now().Add(time.Duration(s.cfg.SessionTTLSeconds) * time.Second).Unix()})
+	sid, _ := randomTokenHex(16)
+	_ = s.setCookie(w, s.cfg.PortalCookieName, Session{Subject: req.Email, Kind: "portal", Workspace: workspaceSlug, SessionID: sid, Exp: time.Now().Add(time.Duration(s.cfg.SessionTTLSeconds) * time.Second).Unix()})
 	_, _ = s.setCSRFCookie(w, "portal")
 	s.audit(r.Context(), "mailbox", req.Email, "portal.login", s.clientIP(r), `{}`)
 	writeJSON(w, 200, map[string]any{"ok": true, "email": req.Email, "workspace_slug": workspaceSlug})
@@ -1995,6 +2272,9 @@ func (s *Server) handlePortalLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	if sess, err := s.getSession(r, s.cfg.PortalCookieName, "portal"); err == nil {
 		s.revokeWebmailTokensForMailbox(r.Context(), sess.Subject)
+		if strings.TrimSpace(sess.SessionID) != "" {
+			s.clearWebmailSessionAccounts(r.Context(), sess.SessionID)
+		}
 	}
 	s.clearCookie(w, s.cfg.PortalCookieName)
 	s.clearCSRFCookie(w, "portal")
@@ -2088,7 +2368,392 @@ func (s *Server) handlePortalPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.revokeWebmailTokensForMailbox(r.Context(), sess.Subject)
+	if strings.TrimSpace(sess.SessionID) != "" {
+		s.clearWebmailSessionAccounts(r.Context(), sess.SessionID)
+	}
 	s.audit(r.Context(), "mailbox", sess.Subject, "portal.change_password", sess.Subject, `{}`)
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (s *Server) ensurePortalSessionID(w http.ResponseWriter, sess *Session) error {
+	if sess == nil {
+		return fmt.Errorf("missing session")
+	}
+	if strings.TrimSpace(sess.SessionID) != "" {
+		return nil
+	}
+	sid, err := randomTokenHex(16)
+	if err != nil {
+		return err
+	}
+	sess.SessionID = sid
+	return s.setCookie(w, s.cfg.PortalCookieName, *sess)
+}
+
+func (s *Server) handleMailAuthLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "METHOD_NOT_ALLOWED", "Method not allowed")
+		return
+	}
+	var req struct{ Email, Password string }
+	if err := readJSON(r, &req); err != nil {
+		writeErr(w, 400, "BAD_REQUEST", "Invalid JSON body")
+		return
+	}
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	if !emailRe.MatchString(req.Email) {
+		writeErr(w, 400, "BAD_REQUEST", "Invalid email")
+		return
+	}
+	if strings.TrimSpace(req.Password) == "" {
+		writeErr(w, 400, "BAD_REQUEST", "Password is required")
+		return
+	}
+	loginKey := "mail_login_limit|" + s.clientIP(r) + "|" + req.Email
+	if err := s.checkLoginRateLimit(loginKey); err != nil {
+		writeErr(w, 429, "RATE_LIMITED", err.Error())
+		return
+	}
+	workspaceSlug := strings.TrimSpace(r.Header.Get("X-Workspace-Slug"))
+	if workspaceSlug == "" {
+		workspaceSlug = "default"
+	}
+	if ok, err := s.mailboxInWorkspace(r.Context(), workspaceSlug, req.Email); err != nil {
+		writeErr(w, 500, "DB_ERROR", err.Error())
+		return
+	} else if !ok {
+		writeErr(w, 403, "FORBIDDEN", "Mailbox is not in this workspace")
+		return
+	}
+	hash, active, found, err := s.mailboxLookup(r.Context(), req.Email)
+	if err != nil {
+		writeErr(w, 500, "DB_ERROR", err.Error())
+		return
+	}
+	if !found || !active || s.verifyHash(r.Context(), hash, req.Password) != nil {
+		s.registerLoginFailure(loginKey)
+		writeErr(w, 401, "AUTH_FAILED", "Invalid credentials")
+		return
+	}
+	s.clearLoginFailure(loginKey)
+	sid, err := randomTokenHex(16)
+	if err != nil {
+		writeErr(w, 500, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	sess := Session{Subject: req.Email, Kind: "portal", Workspace: workspaceSlug, SessionID: sid, Exp: time.Now().Add(time.Duration(s.cfg.SessionTTLSeconds) * time.Second).Unix()}
+	s.clearWebmailSessionAccounts(r.Context(), sid)
+	account, err := s.createWebmailAccount(r.Context(), &sess, req.Email, req.Password, hash)
+	if err != nil {
+		s.clearWebmailSessionAccounts(r.Context(), sid)
+		writeErr(w, 500, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	if err := s.setCookie(w, s.cfg.PortalCookieName, sess); err != nil {
+		writeErr(w, 500, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	_, _ = s.setCSRFCookie(w, "portal")
+	writeJSON(w, 200, map[string]any{
+		"ok": true,
+		"session": map[string]any{
+			"primary_email": sess.Subject,
+			"workspace":     sess.Workspace,
+			"session_id":    sess.SessionID,
+		},
+		"accounts": []any{s.sanitizeWebmailAccount(account)},
+	})
+}
+
+func (s *Server) handleMailAuthSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, 405, "METHOD_NOT_ALLOWED", "Method not allowed")
+		return
+	}
+	sess := s.requirePortal(w, r)
+	if sess == nil {
+		return
+	}
+	if err := s.ensurePortalSessionID(w, sess); err != nil {
+		writeErr(w, 500, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	accounts, err := s.listWebmailAccounts(r.Context(), sess.SessionID)
+	if err != nil {
+		writeErr(w, 500, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	items := make([]any, 0, len(accounts))
+	for _, account := range accounts {
+		items = append(items, s.sanitizeWebmailAccount(account))
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "session": map[string]any{"primary_email": sess.Subject, "workspace": sess.Workspace, "session_id": sess.SessionID}, "accounts": items})
+}
+
+func (s *Server) handleMailAccounts(w http.ResponseWriter, r *http.Request) {
+	sess := s.requirePortal(w, r)
+	if sess == nil {
+		return
+	}
+	if err := s.ensurePortalSessionID(w, sess); err != nil {
+		writeErr(w, 500, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		accounts, err := s.listWebmailAccounts(r.Context(), sess.SessionID)
+		if err != nil {
+			writeErr(w, 500, "INTERNAL_ERROR", err.Error())
+			return
+		}
+		items := make([]any, 0, len(accounts))
+		for _, account := range accounts {
+			items = append(items, s.sanitizeWebmailAccount(account))
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "items": items})
+	case http.MethodPost:
+		var req struct{ Email, Password string }
+		if err := readJSON(r, &req); err != nil {
+			writeErr(w, 400, "BAD_REQUEST", "Invalid JSON body")
+			return
+		}
+		req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+		accounts, _ := s.listWebmailAccounts(r.Context(), sess.SessionID)
+		if len(accounts) >= max(1, s.cfg.WebmailMaxAccounts) {
+			writeErr(w, 400, "BAD_REQUEST", "max connected mailbox limit reached")
+			return
+		}
+		for _, item := range accounts {
+			if strings.EqualFold(item.Email, req.Email) {
+				writeErr(w, 400, "BAD_REQUEST", "mailbox already connected")
+				return
+			}
+		}
+		connectKey := "mail_account_connect_limit|" + s.clientIP(r) + "|" + req.Email
+		if err := s.checkLoginRateLimit(connectKey); err != nil {
+			writeErr(w, 429, "RATE_LIMITED", err.Error())
+			return
+		}
+		hash, active, found, err := s.mailboxLookup(r.Context(), req.Email)
+		if err != nil {
+			writeErr(w, 500, "DB_ERROR", err.Error())
+			return
+		}
+		if !found || !active || s.verifyHash(r.Context(), hash, req.Password) != nil {
+			s.registerLoginFailure(connectKey)
+			writeErr(w, 401, "AUTH_FAILED", "Invalid credentials")
+			return
+		}
+		s.clearLoginFailure(connectKey)
+		if ok, err := s.mailboxInWorkspace(r.Context(), sess.Workspace, req.Email); err != nil {
+			writeErr(w, 500, "DB_ERROR", err.Error())
+			return
+		} else if !ok {
+			writeErr(w, 403, "FORBIDDEN", "Mailbox is not in this workspace")
+			return
+		}
+		account, err := s.createWebmailAccount(r.Context(), sess, req.Email, req.Password, hash)
+		if err != nil {
+			writeErr(w, 500, "INTERNAL_ERROR", err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "account": s.sanitizeWebmailAccount(account)})
+	default:
+		writeErr(w, 405, "METHOD_NOT_ALLOWED", "Method not allowed")
+	}
+}
+
+func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
+	sess := s.requirePortal(w, r)
+	if sess == nil {
+		return
+	}
+	if err := s.ensurePortalSessionID(w, sess); err != nil {
+		writeErr(w, 500, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/mail/accounts/"), "/")
+	if len(parts) < 1 || strings.TrimSpace(parts[0]) == "" {
+		writeErr(w, 400, "BAD_REQUEST", "missing account id")
+		return
+	}
+	accountID := strings.TrimSpace(parts[0])
+	if len(parts) == 1 && r.Method == http.MethodDelete {
+		s.removeWebmailAccount(r.Context(), sess.SessionID, accountID)
+		accounts, _ := s.listWebmailAccounts(r.Context(), sess.SessionID)
+		if len(accounts) == 0 {
+			s.clearCookie(w, s.cfg.PortalCookieName)
+			s.clearCSRFCookie(w, "portal")
+		}
+		writeJSON(w, 200, map[string]any{"ok": true})
+		return
+	}
+	if len(parts) == 3 && parts[1] == "password" && r.Method == http.MethodPost {
+		writeErr(w, 501, "NOT_IMPLEMENTED", "use mailbox settings endpoint")
+		return
+	}
+	if len(parts) >= 5 && parts[1] == "folders" && parts[3] == "messages" && r.Method == http.MethodGet {
+		folder := strings.ToUpper(strings.TrimSpace(parts[2]))
+		uid := strings.TrimSpace(parts[4])
+		if folder == "" || uid == "" {
+			writeErr(w, 400, "BAD_REQUEST", "invalid message reference")
+			return
+		}
+		if _, err := strconv.Atoi(uid); err != nil {
+			writeErr(w, 400, "BAD_REQUEST", "invalid message reference")
+			return
+		}
+		account, err := s.getWebmailAccount(r.Context(), sess.SessionID, accountID)
+		if err != nil {
+			writeErr(w, 404, "NOT_FOUND", "account not found")
+			return
+		}
+		password, err := s.decryptWebmailPassword(account.PasswordCiphertext)
+		if err != nil {
+			writeErr(w, 401, "AUTH_FAILED", "account credentials expired")
+			return
+		}
+		msg, err := s.portalMessage(r.Context(), account.Email, password, uid)
+		if err != nil {
+			writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "item": map[string]any{
+			"account_id":    account.AccountID,
+			"account_email": account.Email,
+			"folder":        folder,
+			"uid":           msg["uid"],
+			"subject":       msg["subject"],
+			"from":          msg["from"],
+			"to":            msg["to"],
+			"date":          msg["date"],
+			"text":          msg["body"],
+			"attachments":   []any{},
+		}})
+		return
+	}
+	writeErr(w, 404, "NOT_FOUND", "Route not found")
+}
+
+func (s *Server) handleMailInbox(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, 405, "METHOD_NOT_ALLOWED", "Method not allowed")
+		return
+	}
+	sess := s.requirePortal(w, r)
+	if sess == nil {
+		return
+	}
+	if err := s.ensurePortalSessionID(w, sess); err != nil {
+		writeErr(w, 500, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	limit := s.cfg.WebmailInboxLimitDefault
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			limit = n
+		}
+	}
+	limit = min(max(1, limit), max(1, s.cfg.WebmailInboxLimitMax))
+	accountParam := strings.TrimSpace(r.URL.Query().Get("account"))
+	if accountParam == "" {
+		accountParam = "all"
+	}
+	accounts, err := s.listWebmailAccounts(r.Context(), sess.SessionID)
+	if err != nil {
+		writeErr(w, 500, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	targets := []WebmailAccount{}
+	if accountParam == "all" {
+		targets = accounts
+	} else {
+		for _, account := range accounts {
+			if account.AccountID == accountParam {
+				targets = append(targets, account)
+				break
+			}
+		}
+	}
+	type inboxResult struct {
+		Account WebmailAccount
+		Items   []InboxItem
+		Err     error
+	}
+	results := make(chan inboxResult, len(targets))
+	sem := make(chan struct{}, max(1, s.cfg.WebmailAllInboxConcurrency))
+	var wg sync.WaitGroup
+	for _, account := range targets {
+		wg.Add(1)
+		go func(acc WebmailAccount) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			items, err := s.inboxForAccount(r.Context(), acc, limit)
+			results <- inboxResult{Account: acc, Items: items, Err: err}
+		}(account)
+	}
+	wg.Wait()
+	close(results)
+	merged := []InboxItem{}
+	accountErrors := []map[string]any{}
+	for result := range results {
+		if result.Err != nil {
+			accountErrors = append(accountErrors, map[string]any{"account_id": result.Account.AccountID, "email": result.Account.Email, "error": result.Err.Error()})
+			continue
+		}
+		merged = append(merged, result.Items...)
+	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		return merged[i].InternalDate > merged[j].InternalDate
+	})
+	writeJSON(w, 200, map[string]any{"ok": true, "items": merged, "account_errors": accountErrors})
+}
+
+func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "METHOD_NOT_ALLOWED", "Method not allowed")
+		return
+	}
+	sess := s.requirePortal(w, r)
+	if sess == nil {
+		return
+	}
+	if err := s.ensurePortalSessionID(w, sess); err != nil {
+		writeErr(w, 500, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	var req struct {
+		AccountID string `json:"account_id"`
+		To        string `json:"to"`
+		Subject   string `json:"subject"`
+		Body      string `json:"body"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeErr(w, 400, "BAD_REQUEST", "Invalid JSON body")
+		return
+	}
+	sendKey := "mail_send_limit|" + s.clientIP(r) + "|" + sess.Subject
+	if err := s.checkLoginRateLimit(sendKey); err != nil {
+		writeErr(w, 429, "RATE_LIMITED", err.Error())
+		return
+	}
+	account, err := s.getWebmailAccount(r.Context(), sess.SessionID, req.AccountID)
+	if err != nil {
+		writeErr(w, 404, "NOT_FOUND", "account not found")
+		return
+	}
+	password, err := s.decryptWebmailPassword(account.PasswordCiphertext)
+	if err != nil {
+		writeErr(w, 401, "AUTH_FAILED", "account credentials expired")
+		return
+	}
+	if err := s.portalSendMail(r.Context(), account.Email, password, req.To, req.Subject, req.Body); err != nil {
+		s.registerLoginFailure(sendKey)
+		writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
+		return
+	}
+	s.clearLoginFailure(sendKey)
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 func (s *Server) handlePortalWebmailConnect(w http.ResponseWriter, r *http.Request) {
@@ -3060,6 +3725,13 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/v1/portal/auth/login", s.handlePortalLogin)
 	mux.HandleFunc("/api/v1/portal/auth/logout", s.handlePortalLogout)
 	mux.HandleFunc("/api/v1/portal/auth/session", s.handlePortalSession)
+	mux.HandleFunc("/api/v1/mail/auth/login", s.handleMailAuthLogin)
+	mux.HandleFunc("/api/v1/mail/auth/session", s.handleMailAuthSession)
+	mux.HandleFunc("/api/v1/mail/auth/logout", s.handlePortalLogout)
+	mux.HandleFunc("/api/v1/mail/accounts", s.handleMailAccounts)
+	mux.HandleFunc("/api/v1/mail/accounts/", s.handleMailAccountItem)
+	mux.HandleFunc("/api/v1/mail/inbox", s.handleMailInbox)
+	mux.HandleFunc("/api/v1/mail/send", s.handleMailSend)
 	mux.HandleFunc("/api/v1/portal/account/profile", s.handlePortalProfile)
 	mux.HandleFunc("/api/v1/portal/account/aliases", s.handlePortalAliases)
 	mux.HandleFunc("/api/v1/portal/account/password", s.handlePortalPassword)
