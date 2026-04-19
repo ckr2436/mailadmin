@@ -1617,6 +1617,7 @@ func (s *Server) decryptWebmailPassword(raw string) (string, error) {
 }
 
 var errWebmailAccountAlreadyConnected = errors.New("mailbox already connected")
+var errWebmailAccountLimitReached = errors.New("max connected mailbox limit reached")
 
 func (s *Server) webmailSessionAccountsKey(sessionID string) string {
 	return "mailops:webmail:session:" + strings.TrimSpace(sessionID) + ":accounts"
@@ -1669,6 +1670,12 @@ func (s *Server) createWebmailAccount(ctx context.Context, sess *Session, email,
 	sessionEmailKey := s.webmailSessionEmailKey(sess.SessionID, email)
 	mailboxSessionsKey := s.webmailMailboxSessionsKey(email)
 	script := `
+local max_accounts = tonumber(ARGV[5])
+local current_count = redis.call("SCARD", KEYS[3])
+if current_count >= max_accounts then
+  return "LIMIT"
+end
+
 if redis.call("EXISTS", KEYS[2]) == 1 then
   return "DUPLICATE"
 end
@@ -1695,6 +1702,7 @@ return "OK"
 		ttl,
 		accountID,
 		sess.SessionID,
+		strconv.Itoa(max(1, s.cfg.WebmailMaxAccounts)),
 	)
 	if err != nil {
 		return WebmailAccount{}, err
@@ -1703,6 +1711,8 @@ return "OK"
 	case "OK":
 	case "DUPLICATE":
 		return WebmailAccount{}, errWebmailAccountAlreadyConnected
+	case "LIMIT":
+		return WebmailAccount{}, errWebmailAccountLimitReached
 	default:
 		return WebmailAccount{}, fmt.Errorf("unexpected redis eval result: %s", strings.TrimSpace(setResult))
 	}
@@ -2605,10 +2615,6 @@ func (s *Server) handleMailAccounts(w http.ResponseWriter, r *http.Request) {
 			}
 			activeAccounts = append(activeAccounts, account)
 		}
-		if len(activeAccounts) >= max(1, s.cfg.WebmailMaxAccounts) {
-			writeErr(w, 400, "BAD_REQUEST", "max connected mailbox limit reached")
-			return
-		}
 		for _, item := range activeAccounts {
 			if strings.EqualFold(item.Email, req.Email) {
 				writeErr(w, 400, "BAD_REQUEST", "mailbox already connected")
@@ -2642,6 +2648,10 @@ func (s *Server) handleMailAccounts(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			if errors.Is(err, errWebmailAccountAlreadyConnected) {
 				writeErr(w, 400, "BAD_REQUEST", "mailbox already connected")
+				return
+			}
+			if errors.Is(err, errWebmailAccountLimitReached) {
+				writeErr(w, 400, "BAD_REQUEST", "max connected mailbox limit reached")
 				return
 			}
 			writeErr(w, 500, "INTERNAL_ERROR", err.Error())
