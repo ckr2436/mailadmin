@@ -1919,7 +1919,10 @@ func (s *Server) validateWebmailAccountState(ctx context.Context, sess *Session,
 		return false
 	}
 	hash, active, found, err := s.mailboxLookup(ctx, account.Email)
-	if err != nil || !found || !active || hash != account.PasswordHash {
+	if err != nil {
+		return false
+	}
+	if !found || !active || hash != account.PasswordHash {
 		s.removeWebmailAccount(ctx, sess.SessionID, account.AccountID)
 		return false
 	}
