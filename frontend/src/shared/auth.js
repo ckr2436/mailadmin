@@ -73,7 +73,7 @@ export async function loginAndConnect({ email, password }) {
 }
 
 export async function logoutPortal() {
-  await apiRequest('/api/v1/portal/auth/logout', {
+  await apiRequest('/api/v1/mail/auth/logout', {
     method: 'POST',
     csrfCookieName: PORTAL_CSRF,
   }).catch(() => {})

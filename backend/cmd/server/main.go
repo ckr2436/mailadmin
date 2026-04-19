@@ -64,6 +64,7 @@ type Config struct {
 	RedisAddr                  string
 	RedisPassword              string
 	RedisDB                    int
+	WebmailAccountEncKey       string
 	WebmailAccountTTLSeconds   int64
 	WebmailMaxAccounts         int
 	WebmailInboxLimitDefault   int
@@ -267,6 +268,7 @@ func loadConfig() (Config, error) {
 		RedisAddr:                  env("REDIS_ADDR", "127.0.0.1:6379"),
 		RedisPassword:              os.Getenv("REDIS_PASSWORD"),
 		RedisDB:                    int(envInt64("REDIS_DB", 0)),
+		WebmailAccountEncKey:       os.Getenv("WEBMAIL_ACCOUNT_ENC_KEY"),
 		WebmailAccountTTLSeconds:   envInt64("WEBMAIL_ACCOUNT_TTL_SECONDS", 28800),
 		WebmailMaxAccounts:         int(envInt64("WEBMAIL_MAX_ACCOUNTS_PER_SESSION", 10)),
 		WebmailInboxLimitDefault:   int(envInt64("WEBMAIL_INBOX_LIMIT_DEFAULT", 50)),
@@ -276,6 +278,9 @@ func loadConfig() (Config, error) {
 	}
 	if cfg.SessionSecret == "" {
 		return cfg, fmt.Errorf("SESSION_SECRET is required")
+	}
+	if strings.TrimSpace(cfg.WebmailAccountEncKey) == "" {
+		return cfg, fmt.Errorf("WEBMAIL_ACCOUNT_ENC_KEY is required")
 	}
 	cfg.RedisNetwork = strings.ToLower(strings.TrimSpace(cfg.RedisNetwork))
 	if cfg.RedisNetwork != "tcp" && cfg.RedisNetwork != "unix" {
@@ -1662,21 +1667,45 @@ func (s *Server) createWebmailAccount(ctx context.Context, sess *Session, email,
 	sessionAccountsKey := s.webmailSessionAccountsKey(sess.SessionID)
 	sessionAccountKey := s.webmailSessionAccountKey(sess.SessionID, accountID)
 	sessionEmailKey := s.webmailSessionEmailKey(sess.SessionID, email)
-	setResult, err := s.redisRun(ctx, "SET", sessionEmailKey, accountID, "NX", "EX", ttl)
+	mailboxSessionsKey := s.webmailMailboxSessionsKey(email)
+	script := `
+if redis.call("EXISTS", KEYS[2]) == 1 then
+  return "DUPLICATE"
+end
+
+redis.call("SET", KEYS[1], ARGV[1], "EX", ARGV[2])
+redis.call("SET", KEYS[2], ARGV[3], "EX", ARGV[2])
+redis.call("SADD", KEYS[3], ARGV[3])
+redis.call("EXPIRE", KEYS[3], ARGV[2])
+redis.call("SADD", KEYS[4], ARGV[4])
+redis.call("EXPIRE", KEYS[4], ARGV[2])
+
+return "OK"
+`
+	setResult, err := s.redisRun(
+		ctx,
+		"EVAL",
+		script,
+		"4",
+		sessionAccountKey,
+		sessionEmailKey,
+		sessionAccountsKey,
+		mailboxSessionsKey,
+		string(raw),
+		ttl,
+		accountID,
+		sess.SessionID,
+	)
 	if err != nil {
 		return WebmailAccount{}, err
 	}
-	if strings.ToUpper(strings.TrimSpace(setResult)) != "OK" {
+	switch strings.ToUpper(strings.TrimSpace(setResult)) {
+	case "OK":
+	case "DUPLICATE":
 		return WebmailAccount{}, errWebmailAccountAlreadyConnected
+	default:
+		return WebmailAccount{}, fmt.Errorf("unexpected redis eval result: %s", strings.TrimSpace(setResult))
 	}
-	if _, err := s.redisRun(ctx, "SETEX", sessionAccountKey, ttl, string(raw)); err != nil {
-		_, _ = s.redisRun(ctx, "DEL", sessionEmailKey)
-		return WebmailAccount{}, err
-	}
-	_, _ = s.redisRun(ctx, "SADD", sessionAccountsKey, accountID)
-	_, _ = s.redisRun(ctx, "EXPIRE", sessionAccountsKey, ttl)
-	_, _ = s.redisRun(ctx, "SADD", s.webmailMailboxSessionsKey(email), sess.SessionID)
-	_, _ = s.redisRun(ctx, "EXPIRE", s.webmailMailboxSessionsKey(email), ttl)
 	return account, nil
 }
 
@@ -2466,6 +2495,7 @@ func (s *Server) handleMailAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.setCookie(w, s.cfg.PortalCookieName, sess); err != nil {
+		s.clearWebmailSessionAccounts(r.Context(), sid)
 		writeErr(w, 500, "INTERNAL_ERROR", err.Error())
 		return
 	}
@@ -2550,6 +2580,14 @@ func (s *Server) handleMailAccounts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+		if !emailRe.MatchString(req.Email) {
+			writeErr(w, 400, "BAD_REQUEST", "Invalid email")
+			return
+		}
+		if strings.TrimSpace(req.Password) == "" {
+			writeErr(w, 400, "BAD_REQUEST", "Password is required")
+			return
+		}
 		accounts, err := s.listWebmailAccounts(r.Context(), sess.SessionID)
 		if err != nil {
 			writeErr(w, 500, "INTERNAL_ERROR", err.Error())
@@ -3666,10 +3704,6 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/v1/platform/mail/health/maps", s.handleMaps)
 	mux.HandleFunc("/api/v1/tenants", s.routeTenants)
 	mux.HandleFunc("/api/v1/tenants/", s.routeTenants)
-	// compatibility
-	mux.HandleFunc("/api/v1/portal/auth/login", s.handlePortalLogin)
-	mux.HandleFunc("/api/v1/portal/auth/logout", s.handlePortalLogout)
-	mux.HandleFunc("/api/v1/portal/auth/session", s.handlePortalSession)
 	mux.HandleFunc("/api/v1/mail/auth/login", s.handleMailAuthLogin)
 	mux.HandleFunc("/api/v1/mail/auth/session", s.handleMailAuthSession)
 	mux.HandleFunc("/api/v1/mail/auth/logout", s.handlePortalLogout)
@@ -3677,15 +3711,6 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/v1/mail/accounts/", s.handleMailAccountItem)
 	mux.HandleFunc("/api/v1/mail/inbox", s.handleMailInbox)
 	mux.HandleFunc("/api/v1/mail/send", s.handleMailSend)
-	mux.HandleFunc("/api/v1/portal/account/profile", s.handlePortalProfile)
-	mux.HandleFunc("/api/v1/portal/account/aliases", s.handlePortalAliases)
-	mux.HandleFunc("/api/v1/portal/account/password", s.handlePortalPassword)
-	mux.HandleFunc("/api/v1/admin/domains", s.handleDomains)
-	mux.HandleFunc("/api/v1/admin/domains/", s.handleDomainItem)
-	mux.HandleFunc("/api/v1/admin/mailboxes", s.handleMailboxes)
-	mux.HandleFunc("/api/v1/admin/mailboxes/", s.handleMailboxItem)
-	mux.HandleFunc("/api/v1/admin/aliases", s.handleAliases)
-	mux.HandleFunc("/api/v1/admin/aliases/", s.handleAliasItem)
 	return mux
 }
 
@@ -3695,7 +3720,7 @@ func main() {
 	if err != nil {
 		logger.Fatal(err)
 	}
-	encKey := sha256.Sum256([]byte(cfg.SessionSecret + "|webmail-account"))
+	encKey := sha256.Sum256([]byte(cfg.WebmailAccountEncKey))
 	srv := &Server{cfg: cfg, logger: logger, loginAttempts: map[string]loginAttempt{}, webmailEncKey: encKey}
 	if err := srv.ensureMetaTables(context.Background()); err != nil {
 		logger.Fatalf("ensure meta tables failed: %v", err)
