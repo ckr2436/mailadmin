@@ -2619,11 +2619,18 @@ func (s *Server) handleMailAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 		req.Email = strings.ToLower(strings.TrimSpace(req.Email))
 		accounts, _ := s.listWebmailAccounts(r.Context(), sess.SessionID)
-		if len(accounts) >= max(1, s.cfg.WebmailMaxAccounts) {
+		activeAccounts := make([]WebmailAccount, 0, len(accounts))
+		for _, account := range accounts {
+			if !s.validateWebmailAccountState(r.Context(), sess, account) {
+				continue
+			}
+			activeAccounts = append(activeAccounts, account)
+		}
+		if len(activeAccounts) >= max(1, s.cfg.WebmailMaxAccounts) {
 			writeErr(w, 400, "BAD_REQUEST", "max connected mailbox limit reached")
 			return
 		}
-		for _, item := range accounts {
+		for _, item := range activeAccounts {
 			if strings.EqualFold(item.Email, req.Email) {
 				writeErr(w, 400, "BAD_REQUEST", "mailbox already connected")
 				return
@@ -2853,6 +2860,9 @@ func (s *Server) handleMailInbox(w http.ResponseWriter, r *http.Request) {
 	sort.SliceStable(merged, func(i, j int) bool {
 		return merged[i].InternalDate > merged[j].InternalDate
 	})
+	if len(merged) > limit {
+		merged = merged[:limit]
+	}
 	writeJSON(w, 200, map[string]any{"ok": true, "items": merged, "account_errors": accountErrors})
 }
 
