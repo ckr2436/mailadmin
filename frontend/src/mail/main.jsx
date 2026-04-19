@@ -6,6 +6,7 @@ import {
   connectMailbox,
   disconnectMailbox,
   getInbox,
+  getMailAccounts,
   getMailSession,
   getMessage,
   handleSessionExpired,
@@ -24,7 +25,7 @@ function MailApp() {
   const [addOpen, setAddOpen] = useState(false)
 
   const sessionQuery = useQuery({ queryKey: ['mailSession'], queryFn: getMailSession, retry: false })
-  const accountsQuery = useQuery({ queryKey: ['mailAccounts'], queryFn: getMailSession, retry: false })
+  const accountsQuery = useQuery({ queryKey: ['mailAccounts'], queryFn: getMailAccounts, retry: false })
   const inboxQuery = useQuery({
     queryKey: ['mailInbox', activeAccountId],
     queryFn: () => getInbox(activeAccountId, 50),
@@ -32,7 +33,7 @@ function MailApp() {
   })
 
   const messageQuery = useQuery({
-    queryKey: ['mailMessage', selectedMessageRef?.account_id, selectedMessageRef?.uid],
+    queryKey: ['mailMessage', selectedMessageRef?.account_id, selectedMessageRef?.folder, selectedMessageRef?.uid],
     queryFn: () => getMessage(selectedMessageRef.account_id, selectedMessageRef.uid, selectedMessageRef.folder || 'INBOX'),
     enabled: !!selectedMessageRef?.account_id && !!selectedMessageRef?.uid,
   })
