@@ -2641,7 +2641,16 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "INTERNAL_ERROR", err.Error())
 		return
 	}
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/mail/accounts/"), "/")
+	pathSuffix := strings.TrimPrefix(r.URL.EscapedPath(), "/api/v1/mail/accounts/")
+	parts := strings.Split(pathSuffix, "/")
+	for i := range parts {
+		decoded, err := url.PathUnescape(parts[i])
+		if err != nil {
+			writeErr(w, 400, "BAD_REQUEST", "invalid path")
+			return
+		}
+		parts[i] = decoded
+	}
 	if len(parts) < 1 || strings.TrimSpace(parts[0]) == "" {
 		writeErr(w, 400, "BAD_REQUEST", "missing account id")
 		return
@@ -2662,12 +2671,7 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) >= 5 && parts[1] == "folders" && parts[3] == "messages" && r.Method == http.MethodGet {
-		folderDecoded, err := url.PathUnescape(parts[2])
-		if err != nil {
-			writeErr(w, 400, "BAD_REQUEST", "invalid folder")
-			return
-		}
-		folder, err := normalizeIMAPFolder(folderDecoded)
+		folder, err := normalizeIMAPFolder(parts[2])
 		if err != nil {
 			writeErr(w, 400, "BAD_REQUEST", err.Error())
 			return
