@@ -2745,14 +2745,28 @@ func (s *Server) handleMailInbox(w http.ResponseWriter, r *http.Request) {
 	}
 	targets := []WebmailAccount{}
 	accountPasswords := map[string]string{}
+	accountErrors := []map[string]any{}
 	if accountParam == "all" {
 		for _, account := range accounts {
 			resolved, password, err := s.resolveWebmailAccount(r.Context(), sess, account.AccountID)
 			if err != nil {
+				accountErrors = append(accountErrors, map[string]any{
+					"account_id": account.AccountID,
+					"email":      account.Email,
+					"error":      err.Error(),
+				})
+				if err.Error() != "account not found" && err.Error() != "mailbox session invalid" {
+					writeErr(w, 500, "DB_ERROR", err.Error())
+					return
+				}
 				continue
 			}
 			targets = append(targets, resolved)
 			accountPasswords[resolved.AccountID] = password
+		}
+		if len(targets) == 0 {
+			writeJSON(w, 200, map[string]any{"ok": true, "items": []InboxItem{}, "account_errors": accountErrors})
+			return
 		}
 	} else {
 		resolved, password, err := s.resolveWebmailAccount(r.Context(), sess, accountParam)
@@ -2790,7 +2804,6 @@ func (s *Server) handleMailInbox(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 	close(results)
 	merged := []InboxItem{}
-	accountErrors := []map[string]any{}
 	for result := range results {
 		if result.Err != nil {
 			accountErrors = append(accountErrors, map[string]any{"account_id": result.Account.AccountID, "email": result.Account.Email, "error": result.Err.Error()})
