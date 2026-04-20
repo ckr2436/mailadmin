@@ -1674,6 +1674,10 @@ func (s *Server) createWebmailAccount(ctx context.Context, sess *Session, email,
 local max_accounts = tonumber(ARGV[5])
 local account_key_prefix = ARGV[6]
 
+if max_accounts == nil or max_accounts < 1 then
+  max_accounts = 1
+end
+
 local ids = redis.call("SMEMBERS", KEYS[3])
 local active_count = 0
 
@@ -1686,12 +1690,19 @@ for _, id in ipairs(ids) do
   end
 end
 
-if active_count >= max_accounts then
-  return "LIMIT"
+local existing_id = redis.call("GET", KEYS[2])
+if existing_id and existing_id ~= false and existing_id ~= "" then
+  local existing_key = account_key_prefix .. existing_id
+  if redis.call("EXISTS", existing_key) == 1 then
+    return "DUPLICATE"
+  end
+
+  redis.call("DEL", KEYS[2])
+  redis.call("SREM", KEYS[3], existing_id)
 end
 
-if redis.call("EXISTS", KEYS[2]) == 1 then
-  return "DUPLICATE"
+if active_count >= max_accounts then
+  return "LIMIT"
 end
 
 redis.call("SET", KEYS[1], ARGV[1], "EX", ARGV[2])
@@ -1765,6 +1776,16 @@ func (s *Server) listWebmailAccounts(ctx context.Context, sessionID string) ([]W
 			continue
 		}
 		if item.AccountID == "" || item.AccountID != accountID {
+			if strings.TrimSpace(item.Email) != "" {
+				emailKey := s.webmailSessionEmailKey(sessionID, item.Email)
+				mappedID, mapErr := s.redisRun(ctx, "GET", emailKey)
+
+				if mapErr == nil && strings.TrimSpace(mappedID) == accountID {
+					_, _ = s.redisRun(ctx, "DEL", emailKey)
+					_, _ = s.redisRun(ctx, "SREM", s.webmailMailboxSessionsKey(item.Email), sessionID)
+				}
+			}
+
 			_, _ = s.redisRun(ctx, "SREM", s.webmailSessionAccountsKey(sessionID), accountID)
 			_, _ = s.redisRun(ctx, "DEL", accountKey)
 			continue
