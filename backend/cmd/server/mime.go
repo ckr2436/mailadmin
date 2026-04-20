@@ -234,13 +234,88 @@ func buildMIMEPreview(raw []byte, maxBytes int64, maxChars int) string {
 	}
 	parsed, err := parseMIMEEmail(raw, maxBytes)
 	if err != nil {
-		return ""
+		return fallbackPreviewFromRaw(raw, maxChars)
 	}
 	text := strings.TrimSpace(parsed.Text)
 	if text == "" {
 		text = htmlToPlainText(parsed.HTML)
 	}
 	return cleanPreviewText(text, maxChars)
+}
+
+func fallbackPreviewFromRaw(raw []byte, maxChars int) string {
+	body := stripMessageHeaders(string(raw))
+	if strings.TrimSpace(body) == "" {
+		return ""
+	}
+	lines := strings.Split(strings.ReplaceAll(body, "\r", "\n"), "\n")
+	collected := make([]string, 0, len(lines))
+	inPartHeaders := false
+	partMediaType := ""
+	partAttachment := false
+	sawBoundary := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "--") {
+			inPartHeaders = true
+			partMediaType = ""
+			partAttachment = false
+			sawBoundary = true
+			continue
+		}
+		if inPartHeaders {
+			if trimmed == "" {
+				inPartHeaders = false
+				continue
+			}
+			lower := strings.ToLower(trimmed)
+			if strings.HasPrefix(lower, "content-type:") {
+				partMediaType = strings.TrimSpace(strings.SplitN(strings.TrimSpace(lower[len("content-type:"):]), ";", 2)[0])
+			}
+			if strings.HasPrefix(lower, "content-disposition:") {
+				if strings.Contains(lower, "attachment") || strings.Contains(lower, "filename=") {
+					partAttachment = true
+				}
+			}
+			continue
+		}
+		if trimmed == "" {
+			continue
+		}
+		if isLikelyBase64Line(trimmed) {
+			continue
+		}
+		if sawBoundary {
+			isTextPart := partMediaType == "" || strings.HasPrefix(partMediaType, "text/plain") || strings.HasPrefix(partMediaType, "text/html")
+			if !isTextPart || partAttachment {
+				continue
+			}
+		}
+		collected = append(collected, trimmed)
+	}
+	return cleanPreviewText(strings.Join(collected, "\n"), maxChars)
+}
+
+func stripMessageHeaders(raw string) string {
+	normalized := strings.ReplaceAll(raw, "\r\n", "\n")
+	if idx := strings.Index(normalized, "\n\n"); idx >= 0 {
+		return normalized[idx+2:]
+	}
+	return normalized
+}
+
+func isLikelyBase64Line(v string) bool {
+	if len(v) < 40 || strings.ContainsAny(v, " \t") {
+		return false
+	}
+	for _, r := range v {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '+' || r == '/' || r == '=' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func htmlToPlainText(v string) string {

@@ -220,8 +220,19 @@ func TestBuildMIMEPreviewHTMLOnePart(t *testing.T) {
 func TestBuildMIMEPreviewMalformedMIME(t *testing.T) {
 	raw := []byte("Content-Type: multipart/mixed\r\n\r\n--oops\r\nContent-Type: text/plain\r\n\r\nbroken")
 	preview := buildMIMEPreview(raw, 64*1024, 180)
-	if preview != "" {
-		t.Fatalf("expected empty preview for malformed MIME, got %q", preview)
+	if preview != "broken" {
+		t.Fatalf("expected fallback preview for malformed MIME, got %q", preview)
+	}
+}
+
+func TestBuildMIMEPreviewParseFailSkipsAttachmentChunk(t *testing.T) {
+	raw := []byte("Content-Type: multipart/mixed; boundary=abc\r\n\r\n--abc\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nHello body\r\n--abc\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Disposition: attachment; filename=secret.txt\r\n\r\nATTACHMENT-SECRET-CONTENT")
+	preview := buildMIMEPreview(raw, 64*1024, 180)
+	if strings.Contains(preview, "ATTACHMENT-SECRET-CONTENT") {
+		t.Fatalf("attachment payload should not leak during fallback preview: %q", preview)
+	}
+	if !strings.Contains(preview, "Hello body") {
+		t.Fatalf("expected body text in fallback preview, got %q", preview)
 	}
 }
 
