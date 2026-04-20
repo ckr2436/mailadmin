@@ -1694,6 +1694,8 @@ local existing_id = redis.call("GET", KEYS[2])
 if existing_id and existing_id ~= false and existing_id ~= "" then
   local existing_key = account_key_prefix .. existing_id
   if redis.call("EXISTS", existing_key) == 1 then
+    redis.call("SADD", KEYS[3], existing_id)
+    redis.call("EXPIRE", KEYS[3], ARGV[2])
     return "DUPLICATE"
   end
 
