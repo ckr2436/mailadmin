@@ -120,10 +120,7 @@ func parseMIMEPart(h textproto.MIMEHeader, body io.Reader, state *mimeParseState
 
 	if !isAttachment && (strings.EqualFold(mediaType, "text/plain") || strings.EqualFold(mediaType, "text/html")) {
 		charsetLabel := params["charset"]
-		utfReader, err := toUTF8Reader(decodedBody, charsetLabel)
-		if err != nil {
-			return err
-		}
+		utfReader, _ := toUTF8Reader(decodedBody, charsetLabel)
 		content, err := readLimitedText(utfReader, state)
 		if err != nil {
 			return err
@@ -142,10 +139,7 @@ func parseMIMEPart(h textproto.MIMEHeader, body io.Reader, state *mimeParseState
 		return nil
 	}
 
-	size, err := io.Copy(io.Discard, decodedBody)
-	if err != nil {
-		return err
-	}
+	size, _ := io.Copy(io.Discard, decodedBody)
 	state.attachments = append(state.attachments, ParsedAttachment{
 		Filename:    decodeHeaderWord(filename),
 		ContentType: mediaType,
@@ -175,7 +169,7 @@ func toUTF8Reader(r io.Reader, cs string) (io.Reader, error) {
 	}
 	converted, err := charset.NewReaderLabel(cs, r)
 	if err != nil {
-		return nil, err
+		return r, nil
 	}
 	return converted, nil
 }

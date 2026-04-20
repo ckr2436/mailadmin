@@ -153,3 +153,31 @@ func TestRunLimitedReadsLiteralWithinLimit(t *testing.T) {
 		t.Fatalf("expected literal content in output: %q", raw)
 	}
 }
+
+func TestParseMIMEEmailInvalidCharsetFallsBack(t *testing.T) {
+	raw := []byte("Content-Type: text/plain; charset=unknown-charset\r\n\r\nhello fallback")
+	parsed, err := parseMIMEEmail(raw, 1024)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if strings.TrimSpace(parsed.Text) != "hello fallback" {
+		t.Fatalf("unexpected text: %q", parsed.Text)
+	}
+}
+
+func TestParseMIMEEmailCorruptAttachmentDecodeKeepsBody(t *testing.T) {
+	raw := []byte("Content-Type: multipart/mixed; boundary=xyz\r\n\r\n--xyz\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nvisible body\r\n--xyz\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=broken.bin\r\nContent-Transfer-Encoding: base64\r\n\r\n%%%%\r\n--xyz--\r\n")
+	parsed, err := parseMIMEEmail(raw, 2048)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if !strings.Contains(parsed.Text, "visible body") {
+		t.Fatalf("missing body text: %q", parsed.Text)
+	}
+	if len(parsed.Attachments) != 1 {
+		t.Fatalf("expected 1 attachment, got %d", len(parsed.Attachments))
+	}
+	if parsed.Attachments[0].Filename != "broken.bin" {
+		t.Fatalf("unexpected filename: %q", parsed.Attachments[0].Filename)
+	}
+}
