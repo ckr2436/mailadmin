@@ -5,13 +5,19 @@ import DOMPurify from 'dompurify'
 import { logoutPortal } from '../shared/auth'
 import {
   connectMailbox,
+  deleteMessage,
   disconnectMailbox,
+  getFolderMessages,
+  getFolders,
   getInbox,
   getMailAccounts,
   getMailSession,
   getMessage,
   handleSessionExpired,
   logoutMailSession,
+  markJunk,
+  moveMessage,
+  saveDraft,
   sendMessage,
 } from '../shared/webmail'
 import '../styles.css'
@@ -28,15 +34,23 @@ function formatDateLabel(value) {
 function MailApp() {
   const qc = useQueryClient()
   const [activeAccountId, setActiveAccountId] = useState('all')
+  const [activeFolder, setActiveFolder] = useState('INBOX')
   const [selectedMessageRef, setSelectedMessageRef] = useState(null)
   const [composeOpen, setComposeOpen] = useState(false)
   const [addOpen, setAddOpen] = useState(false)
 
   const sessionQuery = useQuery({ queryKey: ['mailSession'], queryFn: getMailSession, retry: false })
   const accountsQuery = useQuery({ queryKey: ['mailAccounts'], queryFn: getMailAccounts, retry: false })
+  const accountFoldersQuery = useQuery({
+    queryKey: ['mailFolders', activeAccountId],
+    queryFn: () => getFolders(activeAccountId),
+    enabled: !!sessionQuery.data && activeAccountId !== 'all',
+  })
   const inboxQuery = useQuery({
-    queryKey: ['mailInbox', activeAccountId],
-    queryFn: () => getInbox(activeAccountId, 50),
+    queryKey: ['mailInbox', activeAccountId, activeFolder],
+    queryFn: () => (activeAccountId === 'all'
+      ? getInbox(activeAccountId, 50)
+      : getFolderMessages(activeAccountId, activeFolder, 50)),
     enabled: !!sessionQuery.data,
   })
 
@@ -72,10 +86,40 @@ function MailApp() {
       qc.invalidateQueries({ queryKey: ['mailInbox'] })
     },
   })
+  const draftMutation = useMutation({
+    mutationFn: ({ accountId, payload }) => saveDraft(accountId, payload),
+    onSuccess: () => {
+      if (activeFolder === 'Drafts') {
+        qc.invalidateQueries({ queryKey: ['mailInbox'] })
+      }
+    },
+  })
+  const deleteMutation = useMutation({
+    mutationFn: ({ accountId, folder, uid }) => deleteMessage(accountId, folder, uid),
+    onSuccess: () => {
+      setSelectedMessageRef(null)
+      qc.invalidateQueries({ queryKey: ['mailInbox'] })
+    },
+  })
+  const moveMutation = useMutation({
+    mutationFn: ({ accountId, folder, uid, target }) => moveMessage(accountId, folder, uid, target),
+    onSuccess: () => {
+      setSelectedMessageRef(null)
+      qc.invalidateQueries({ queryKey: ['mailInbox'] })
+    },
+  })
+  const junkMutation = useMutation({
+    mutationFn: ({ accountId, folder, uid }) => markJunk(accountId, folder, uid),
+    onSuccess: () => {
+      setSelectedMessageRef(null)
+      qc.invalidateQueries({ queryKey: ['mailInbox'] })
+    },
+  })
 
   const authError = sessionQuery.error?.status === 401 || accountsQuery.error?.status === 401
   const accounts = accountsQuery.data?.accounts || accountsQuery.data?.items || []
   const inboxItems = inboxQuery.data?.items || []
+  const folderItems = accountFoldersQuery.data?.items || []
   const defaultFrom = accounts.length
     ? activeAccountId === 'all' ? accounts[0].account_id : activeAccountId
     : ''
@@ -108,12 +152,12 @@ function MailApp() {
       <div className="webmail-shell">
         <aside className="webmail-sidebar">
           <button className="small compose-button" onClick={() => setComposeOpen(true)}>Compose</button>
-          <button className={`mailbox-link ${activeAccountId === 'all' ? 'active' : ''}`} onClick={() => setActiveAccountId('all')}>All Inboxes</button>
+          <button className={`mailbox-link ${activeAccountId === 'all' ? 'active' : ''}`} onClick={() => { setActiveAccountId('all'); setActiveFolder('INBOX'); setSelectedMessageRef(null) }}>All Inboxes</button>
           {accounts.map((account) => (
             <div key={account.account_id} className="mailbox-row">
               <button
-                className={`mailbox-link ${activeAccountId === account.account_id ? 'active' : ''}`}
-                onClick={() => setActiveAccountId(account.account_id)}
+                className={`mailbox-link ${activeAccountId === account.account_id && activeFolder === 'INBOX' ? 'active' : ''}`}
+                onClick={() => { setActiveAccountId(account.account_id); setActiveFolder('INBOX'); setSelectedMessageRef(null) }}
                 title={account.email}
               >
                 <span className="line-clamp-1">{account.email}</span>
@@ -121,6 +165,17 @@ function MailApp() {
               <button className="ghost small" onClick={() => disconnectMutation.mutate(account.account_id)}>×</button>
             </div>
           ))}
+          {activeAccountId !== 'all' ? (
+            <div className="form-row">
+              {(folderItems.length ? folderItems : [{ path: 'INBOX', name: 'Inbox' }, { path: 'Sent', name: 'Sent' }, { path: 'Drafts', name: 'Drafts' }, { path: 'Junk', name: 'Junk' }, { path: 'Trash', name: 'Trash' }])
+                .filter((f) => ['INBOX', 'Sent', 'Drafts', 'Junk', 'Trash'].includes(f.path))
+                .map((folder) => (
+                  <button key={folder.path} type="button" className={`mailbox-link ${activeFolder === folder.path ? 'active' : ''}`} onClick={() => { setActiveFolder(folder.path); setSelectedMessageRef(null) }}>
+                    {folder.name || folder.path}
+                  </button>
+                ))}
+            </div>
+          ) : null}
           <button className="ghost small add-mailbox-button" onClick={() => setAddOpen((v) => !v)}>+ Add mailbox</button>
           {addOpen ? (
             <form className="form-row" onSubmit={(e) => {
@@ -168,6 +223,29 @@ function MailApp() {
             <article className="card webmail-pane webmail-reader">
               <header className="reader-header">
                 <h2 className="reader-subject">{selectedMessage.subject || '(No subject)'}</h2>
+                <div className="toolbar">
+                  <button
+                    className="secondary small"
+                    disabled={!selectedMessageRef?.account_id || deleteMutation.isPending}
+                    onClick={() => deleteMutation.mutate({ accountId: selectedMessageRef.account_id, folder: selectedMessageRef.folder || activeFolder, uid: selectedMessageRef.uid })}
+                  >
+                    {(selectedMessageRef?.folder || activeFolder) === 'Trash' ? 'Permanently delete' : 'Delete'}
+                  </button>
+                  <button
+                    className="secondary small"
+                    disabled={!selectedMessageRef?.account_id || moveMutation.isPending}
+                    onClick={() => moveMutation.mutate({ accountId: selectedMessageRef.account_id, folder: selectedMessageRef.folder || activeFolder, uid: selectedMessageRef.uid, target: 'INBOX' })}
+                  >
+                    Move to Inbox
+                  </button>
+                  <button
+                    className="secondary small"
+                    disabled={!selectedMessageRef?.account_id || junkMutation.isPending}
+                    onClick={() => junkMutation.mutate({ accountId: selectedMessageRef.account_id, folder: selectedMessageRef.folder || activeFolder, uid: selectedMessageRef.uid })}
+                  >
+                    Mark as Junk
+                  </button>
+                </div>
                 <div className="reader-meta"><span>From:</span><span>{selectedMessage.from || ''}</span></div>
                 <div className="reader-meta"><span>To:</span><span>{selectedMessage.to || ''}</span></div>
                 <div className="reader-meta"><span>Date:</span><span>{formatDateLabel(selectedMessage.date || '')}</span></div>
@@ -205,15 +283,40 @@ function MailApp() {
             sendMutation.mutate({
               account_id: String(fd.get('account_id') || defaultFrom),
               to: String(fd.get('to') || ''),
+              cc: String(fd.get('cc') || ''),
+              bcc: String(fd.get('bcc') || ''),
               subject: String(fd.get('subject') || ''),
               body: String(fd.get('body') || ''),
             })
           }}>
             <select name="account_id" defaultValue={defaultFrom}>{accounts.map((account) => <option key={account.account_id} value={account.account_id}>{account.email}</option>)}</select>
             <input name="to" placeholder="To" />
+            <input name="cc" placeholder="Cc" />
+            <input name="bcc" placeholder="Bcc" />
             <input name="subject" placeholder="Subject" />
             <textarea name="body" rows={7} placeholder="Message body" />
             <button disabled={sendMutation.isPending}>{sendMutation.isPending ? 'Sending...' : 'Send'}</button>
+            <button
+              type="button"
+              className="secondary"
+              disabled={draftMutation.isPending}
+              onClick={(e) => {
+                const form = e.currentTarget.form
+                const fd = new FormData(form)
+                draftMutation.mutate({
+                  accountId: String(fd.get('account_id') || defaultFrom),
+                  payload: {
+                    to: String(fd.get('to') || ''),
+                    cc: String(fd.get('cc') || ''),
+                    bcc: String(fd.get('bcc') || ''),
+                    subject: String(fd.get('subject') || ''),
+                    body: String(fd.get('body') || ''),
+                  },
+                })
+              }}
+            >
+              {draftMutation.isPending ? 'Saving draft...' : 'Save draft'}
+            </button>
           </form>
         </div>
       ) : null}

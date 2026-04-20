@@ -207,12 +207,30 @@ type InboxItem struct {
 	Size         int64  `json:"size,omitempty"`
 }
 
+type MailFolder struct {
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	Role       string `json:"role"`
+	SpecialUse string `json:"special_use,omitempty"`
+	Exists     bool   `json:"exists"`
+}
+
 var (
-	domainRe    = regexp.MustCompile(`^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
-	localpartRe = regexp.MustCompile(`^[A-Za-z0-9._%+\-]+$`)
-	emailRe     = regexp.MustCompile(`^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
-	usernameRe  = regexp.MustCompile(`^[A-Za-z0-9._@\-]{3,64}$`)
+	domainRe     = regexp.MustCompile(`^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
+	localpartRe  = regexp.MustCompile(`^[A-Za-z0-9._%+\-]+$`)
+	emailRe      = regexp.MustCompile(`^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
+	usernameRe   = regexp.MustCompile(`^[A-Za-z0-9._@\-]{3,64}$`)
+	listFolderRe = regexp.MustCompile(`\* LIST \(([^)]*)\) "[^"]*" "?([^"\r\n]+)"?`)
 )
+
+var defaultMailFolders = []MailFolder{
+	{Name: "Inbox", Path: "INBOX", Role: "inbox", SpecialUse: `\Inbox`, Exists: true},
+	{Name: "Sent", Path: "Sent", Role: "sent", SpecialUse: `\Sent`, Exists: true},
+	{Name: "Drafts", Path: "Drafts", Role: "drafts", SpecialUse: `\Drafts`, Exists: true},
+	{Name: "Trash", Path: "Trash", Role: "trash", SpecialUse: `\Trash`, Exists: true},
+	{Name: "Junk", Path: "Junk", Role: "junk", SpecialUse: `\Junk`, Exists: true},
+	{Name: "Archive", Path: "Archive", Role: "archive", SpecialUse: `\Archive`, Exists: true},
+}
 
 func env(key, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
@@ -1430,6 +1448,51 @@ func (c *imapConn) runLimited(command string, maxLiteralBytes int) (string, erro
 	}
 }
 
+func (c *imapConn) appendMessage(folder string, flags []string, when time.Time, raw []byte) error {
+	c.tag++
+	tag := fmt.Sprintf("A%04d", c.tag)
+	flagText := ""
+	if len(flags) > 0 {
+		flagText = " (" + strings.Join(flags, " ") + ")"
+	}
+	dateText := when.UTC().Format("02-Jan-2006 15:04:05 -0700")
+	cmd := fmt.Sprintf(`%s APPEND %q%s "%s" {%d}`+"\r\n", tag, folder, flagText, dateText, len(raw))
+	if _, err := c.wr.WriteString(cmd); err != nil {
+		return err
+	}
+	if err := c.wr.Flush(); err != nil {
+		return err
+	}
+	cont, err := c.rd.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(cont, "+") {
+		return fmt.Errorf("imap append continuation failed: %s", strings.TrimSpace(cont))
+	}
+	if _, err := c.wr.Write(raw); err != nil {
+		return err
+	}
+	if _, err := c.wr.WriteString("\r\n"); err != nil {
+		return err
+	}
+	if err := c.wr.Flush(); err != nil {
+		return err
+	}
+	for {
+		line, err := c.rd.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		if strings.HasPrefix(line, tag+" ") {
+			if !strings.Contains(strings.ToUpper(line), "OK") {
+				return fmt.Errorf("imap append failed: %s", strings.TrimSpace(line))
+			}
+			return nil
+		}
+	}
+}
+
 func extractLiterals(raw string) [][]byte {
 	out := [][]byte{}
 	rest := raw
@@ -1875,12 +1938,13 @@ func (s *Server) sanitizeWebmailAccount(account WebmailAccount) map[string]any {
 }
 
 func normalizeIMAPFolder(raw string) (string, error) {
-	folder := strings.TrimSpace(raw)
+	decoded, err := url.PathUnescape(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("invalid folder")
+	}
+	folder := strings.TrimSpace(decoded)
 	if folder == "" {
 		return "", fmt.Errorf("folder is required")
-	}
-	if strings.EqualFold(folder, "INBOX") {
-		return "INBOX", nil
 	}
 	if strings.ContainsAny(folder, "\r\n\"\\") {
 		return "", fmt.Errorf("invalid folder")
@@ -1888,7 +1952,22 @@ func normalizeIMAPFolder(raw string) (string, error) {
 	if len(folder) > 128 {
 		return "", fmt.Errorf("folder too long")
 	}
-	return folder, nil
+	switch strings.ToLower(folder) {
+	case "inbox":
+		return "INBOX", nil
+	case "sent":
+		return "Sent", nil
+	case "drafts":
+		return "Drafts", nil
+	case "trash":
+		return "Trash", nil
+	case "junk":
+		return "Junk", nil
+	case "archive":
+		return "Archive", nil
+	default:
+		return "", fmt.Errorf("invalid folder")
+	}
 }
 
 func (s *Server) resolveWebmailAccount(ctx context.Context, sess *Session, accountID string) (WebmailAccount, string, error) {
@@ -2065,7 +2144,171 @@ func (s *Server) portalMessage(ctx context.Context, mailboxEmail, password, fold
 	}, nil
 }
 
-func (s *Server) portalSendMail(ctx context.Context, mailboxEmail, password, to, subject, body string) error {
+func (s *Server) moveMessage(ctx context.Context, mailboxEmail, password, sourceFolder, uid, targetFolder string) error {
+	safeSource, err := normalizeIMAPFolder(sourceFolder)
+	if err != nil {
+		return err
+	}
+	safeTarget, err := normalizeIMAPFolder(targetFolder)
+	if err != nil {
+		return err
+	}
+	c, err := newIMAPConn(ctx, s.cfg.MailHost, 993)
+	if err != nil {
+		return err
+	}
+	defer c.close()
+	if _, err := c.run(fmt.Sprintf(`LOGIN %q %q`, mailboxEmail, password)); err != nil {
+		return err
+	}
+	defer c.run("LOGOUT")
+	if _, err := c.run(fmt.Sprintf("SELECT %q", safeSource)); err != nil {
+		return err
+	}
+	if _, err := c.run(fmt.Sprintf("UID MOVE %s %q", strings.TrimSpace(uid), safeTarget)); err == nil {
+		return nil
+	}
+	if _, err := c.run(fmt.Sprintf("UID COPY %s %q", strings.TrimSpace(uid), safeTarget)); err != nil {
+		return err
+	}
+	if _, err := c.run(fmt.Sprintf(`UID STORE %s +FLAGS.SILENT (\Deleted)`, strings.TrimSpace(uid))); err != nil {
+		return err
+	}
+	_, err = c.run("EXPUNGE")
+	return err
+}
+
+func (s *Server) deleteMessage(ctx context.Context, mailboxEmail, password, folder, uid string) error {
+	safeFolder, err := normalizeIMAPFolder(folder)
+	if err != nil {
+		return err
+	}
+	if strings.EqualFold(safeFolder, "Trash") {
+		c, err := newIMAPConn(ctx, s.cfg.MailHost, 993)
+		if err != nil {
+			return err
+		}
+		defer c.close()
+		if _, err := c.run(fmt.Sprintf(`LOGIN %q %q`, mailboxEmail, password)); err != nil {
+			return err
+		}
+		defer c.run("LOGOUT")
+		if _, err := c.run(`SELECT "Trash"`); err != nil {
+			return err
+		}
+		if _, err := c.run(fmt.Sprintf(`UID STORE %s +FLAGS.SILENT (\Deleted)`, strings.TrimSpace(uid))); err != nil {
+			return err
+		}
+		_, err = c.run("EXPUNGE")
+		return err
+	}
+	return s.moveMessage(ctx, mailboxEmail, password, safeFolder, uid, "Trash")
+}
+
+func (s *Server) expungeMessage(ctx context.Context, mailboxEmail, password, folder, uid string) error {
+	safeFolder, err := normalizeIMAPFolder(folder)
+	if err != nil {
+		return err
+	}
+	c, err := newIMAPConn(ctx, s.cfg.MailHost, 993)
+	if err != nil {
+		return err
+	}
+	defer c.close()
+	if _, err := c.run(fmt.Sprintf(`LOGIN %q %q`, mailboxEmail, password)); err != nil {
+		return err
+	}
+	defer c.run("LOGOUT")
+	if _, err := c.run(fmt.Sprintf("SELECT %q", safeFolder)); err != nil {
+		return err
+	}
+	if _, err := c.run(fmt.Sprintf(`UID STORE %s +FLAGS.SILENT (\Deleted)`, strings.TrimSpace(uid))); err != nil {
+		return err
+	}
+	_, err = c.run("EXPUNGE")
+	return err
+}
+
+func (s *Server) saveDraft(ctx context.Context, mailboxEmail, password string, to, cc, bcc, subject, body string) error {
+	toList, err := parseRecipientList(to)
+	if err != nil {
+		return err
+	}
+	ccList, err := parseRecipientList(cc)
+	if err != nil {
+		return err
+	}
+	bccList, err := parseRecipientList(bcc)
+	if err != nil {
+		return err
+	}
+	raw, err := buildOutgoingMessage(mailboxEmail, toList, ccList, bccList, subject, body)
+	if err != nil {
+		return err
+	}
+	return s.appendToFolder(ctx, mailboxEmail, password, "Drafts", []string{`\Draft`}, raw)
+}
+
+func parseRecipientList(raw string) ([]string, error) {
+	rcpts := []string{}
+	for _, p := range strings.Split(raw, ",") {
+		t := strings.TrimSpace(p)
+		if t == "" {
+			continue
+		}
+		if !emailRe.MatchString(t) {
+			return nil, fmt.Errorf("invalid recipient: %s", t)
+		}
+		rcpts = append(rcpts, t)
+	}
+	return rcpts, nil
+}
+
+func buildOutgoingMessage(from string, to []string, cc []string, bcc []string, subject string, body string) ([]byte, error) {
+	if !emailRe.MatchString(strings.TrimSpace(from)) {
+		return nil, fmt.Errorf("invalid from address")
+	}
+	if len(to) == 0 && len(cc) == 0 && len(bcc) == 0 {
+		return nil, fmt.Errorf("recipient is required")
+	}
+	dateHeader := time.Now().UTC().Format(time.RFC1123Z)
+	msgID := fmt.Sprintf("<%d.%s@%s>", time.Now().UnixNano(), strings.ReplaceAll(randomStringToken(8), ".", ""), strings.SplitN(from, "@", 2)[1])
+	var msg bytes.Buffer
+	msg.WriteString("From: " + from + "\r\n")
+	if len(to) > 0 {
+		msg.WriteString("To: " + strings.Join(to, ", ") + "\r\n")
+	}
+	if len(cc) > 0 {
+		msg.WriteString("Cc: " + strings.Join(cc, ", ") + "\r\n")
+	}
+	msg.WriteString("Subject: " + sanitizeMailHeader(subject) + "\r\n")
+	msg.WriteString("Date: " + dateHeader + "\r\n")
+	msg.WriteString("Message-ID: " + msgID + "\r\n")
+	msg.WriteString("MIME-Version: 1.0\r\n")
+	msg.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
+	msg.WriteString("Content-Transfer-Encoding: 8bit\r\n")
+	msg.WriteString("\r\n")
+	msg.WriteString(body)
+	if !strings.HasSuffix(body, "\n") {
+		msg.WriteString("\r\n")
+	}
+	return msg.Bytes(), nil
+}
+
+func randomStringToken(n int) string {
+	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, n)
+	rb := make([]byte, n)
+	if _, err := rand.Read(rb); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	for i := range b {
+		b[i] = letters[int(rb[i])%len(letters)]
+	}
+	return string(b)
+}
+
+func (s *Server) smtpSendRaw(_ context.Context, mailboxEmail, password string, rcpts []string, rawMessage []byte) error {
 	host := s.cfg.MailHost
 	addr := fmt.Sprintf("%s:%d", host, 587)
 	c, err := smtp.Dial(addr)
@@ -2082,17 +2325,6 @@ func (s *Server) portalSendMail(ctx context.Context, mailboxEmail, password, to,
 	if err := c.Mail(mailboxEmail); err != nil {
 		return err
 	}
-	rcpts := []string{}
-	for _, p := range strings.Split(to, ",") {
-		t := strings.TrimSpace(p)
-		if t == "" {
-			continue
-		}
-		if !emailRe.MatchString(t) {
-			return fmt.Errorf("invalid recipient: %s", t)
-		}
-		rcpts = append(rcpts, t)
-	}
 	if len(rcpts) == 0 {
 		return fmt.Errorf("recipient is required")
 	}
@@ -2105,15 +2337,58 @@ func (s *Server) portalSendMail(ctx context.Context, mailboxEmail, password, to,
 	if err != nil {
 		return err
 	}
-	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s\r\n",
-		mailboxEmail, strings.Join(rcpts, ", "), sanitizeMailHeader(subject), time.Now().Format(time.RFC1123Z), body)
-	if _, err := io.WriteString(w, msg); err != nil {
+	if _, err := w.Write(rawMessage); err != nil {
 		return err
 	}
 	if err := w.Close(); err != nil {
 		return err
 	}
 	return c.Quit()
+}
+
+func (s *Server) appendToFolder(ctx context.Context, mailboxEmail, password, folder string, flags []string, raw []byte) error {
+	safeFolder, err := normalizeIMAPFolder(folder)
+	if err != nil {
+		return err
+	}
+	c, err := newIMAPConn(ctx, s.cfg.MailHost, 993)
+	if err != nil {
+		return err
+	}
+	defer c.close()
+	if _, err := c.run(fmt.Sprintf(`LOGIN %q %q`, mailboxEmail, password)); err != nil {
+		return err
+	}
+	defer c.run("LOGOUT")
+	return c.appendMessage(safeFolder, flags, time.Now().UTC(), raw)
+}
+
+func (s *Server) portalSendMail(ctx context.Context, mailboxEmail, password, to, cc, bcc, subject, body string) (bool, string, error) {
+	toList, err := parseRecipientList(to)
+	if err != nil {
+		return false, "", err
+	}
+	ccList, err := parseRecipientList(cc)
+	if err != nil {
+		return false, "", err
+	}
+	bccList, err := parseRecipientList(bcc)
+	if err != nil {
+		return false, "", err
+	}
+	rawMessage, err := buildOutgoingMessage(mailboxEmail, toList, ccList, bccList, subject, body)
+	if err != nil {
+		return false, "", err
+	}
+	rcpts := append(append([]string{}, toList...), ccList...)
+	rcpts = append(rcpts, bccList...)
+	if err := s.smtpSendRaw(ctx, mailboxEmail, password, rcpts, rawMessage); err != nil {
+		return false, "", err
+	}
+	if err := s.appendToFolder(ctx, mailboxEmail, password, "Sent", []string{`\Seen`}, rawMessage); err != nil {
+		return false, "Message sent, but failed to save to Sent", nil
+	}
+	return true, "", nil
 }
 
 func sanitizeMailHeader(v string) string {
@@ -2134,10 +2409,142 @@ func parseIMAPInternalDate(raw string) string {
 	return ts.UTC().Format(time.RFC3339)
 }
 
-func (s *Server) inboxForAccount(ctx context.Context, account WebmailAccount, password string, limit int) ([]InboxItem, error) {
+func mapSpecialUseRole(flags string, path string) (string, string) {
+	lower := strings.ToLower(flags)
+	switch {
+	case strings.Contains(lower, `\inbox`) || strings.EqualFold(path, "INBOX"):
+		return "inbox", `\Inbox`
+	case strings.Contains(lower, `\sent`):
+		return "sent", `\Sent`
+	case strings.Contains(lower, `\drafts`):
+		return "drafts", `\Drafts`
+	case strings.Contains(lower, `\trash`):
+		return "trash", `\Trash`
+	case strings.Contains(lower, `\junk`):
+		return "junk", `\Junk`
+	case strings.Contains(lower, `\archive`):
+		return "archive", `\Archive`
+	default:
+		return "custom", ""
+	}
+}
+
+func roleDisplayName(role, path string) string {
+	switch role {
+	case "inbox":
+		return "Inbox"
+	case "sent":
+		return "Sent"
+	case "drafts":
+		return "Drafts"
+	case "trash":
+		return "Trash"
+	case "junk":
+		return "Junk"
+	case "archive":
+		return "Archive"
+	default:
+		return path
+	}
+}
+
+func parseIMAPFolders(listRaw string) []MailFolder {
+	items := []MailFolder{}
+	for _, line := range splitLines(strings.ReplaceAll(listRaw, "\r", "")) {
+		matches := listFolderRe.FindStringSubmatch(line)
+		if len(matches) < 3 {
+			continue
+		}
+		flags := strings.TrimSpace(matches[1])
+		path := strings.TrimSpace(matches[2])
+		if strings.HasPrefix(path, "\"") && strings.HasSuffix(path, "\"") {
+			path = strings.Trim(path, "\"")
+		}
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		role, specialUse := mapSpecialUseRole(flags, path)
+		items = append(items, MailFolder{
+			Name:       roleDisplayName(role, path),
+			Path:       path,
+			Role:       role,
+			SpecialUse: specialUse,
+			Exists:     true,
+		})
+	}
+	return items
+}
+
+func folderMap(items []MailFolder) map[string]MailFolder {
+	out := map[string]MailFolder{}
+	for _, item := range items {
+		out[strings.ToLower(strings.TrimSpace(item.Path))] = item
+	}
+	return out
+}
+
+func mergeDefaultFolders(items []MailFolder) []MailFolder {
+	merged := make([]MailFolder, 0, len(defaultMailFolders)+len(items))
+	existing := folderMap(items)
+	for _, def := range defaultMailFolders {
+		if item, ok := existing[strings.ToLower(def.Path)]; ok {
+			if item.Role == "custom" {
+				item.Role = def.Role
+				item.SpecialUse = def.SpecialUse
+				item.Name = def.Name
+			}
+			merged = append(merged, item)
+			continue
+		}
+		merged = append(merged, def)
+	}
+	for _, item := range items {
+		if _, ok := existing[strings.ToLower(item.Path)]; ok {
+			found := false
+			for _, m := range merged {
+				if strings.EqualFold(m.Path, item.Path) {
+					found = true
+					break
+				}
+			}
+			if !found && item.Role == "custom" {
+				merged = append(merged, item)
+			}
+		}
+	}
+	return merged
+}
+
+func (s *Server) listFoldersForAccount(ctx context.Context, account WebmailAccount, password string) ([]MailFolder, error) {
+	c, err := newIMAPConn(ctx, s.cfg.MailHost, 993)
+	if err != nil {
+		return nil, err
+	}
+	defer c.close()
+	if _, err := c.run(fmt.Sprintf(`LOGIN %q %q`, account.Email, password)); err != nil {
+		return nil, err
+	}
+	defer c.run("LOGOUT")
+	listRaw, err := c.run(`LIST "" "*"`)
+	if err != nil {
+		return append([]MailFolder{}, defaultMailFolders...), nil
+	}
+	parsed := parseIMAPFolders(listRaw)
+	if len(parsed) == 0 {
+		return append([]MailFolder{}, defaultMailFolders...), nil
+	}
+	return mergeDefaultFolders(parsed), nil
+}
+
+func (s *Server) messagesForAccount(ctx context.Context, account WebmailAccount, password, folder string, limit int) ([]InboxItem, error) {
 	timeout := max(int64(3), s.cfg.WebmailIMAPTimeoutSeconds)
 	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
+	safeFolder, err := normalizeIMAPFolder(folder)
+	if err != nil {
+		return nil, err
+	}
 	c, err := newIMAPConn(cctx, s.cfg.MailHost, 993)
 	if err != nil {
 		return nil, err
@@ -2147,7 +2554,7 @@ func (s *Server) inboxForAccount(ctx context.Context, account WebmailAccount, pa
 		return nil, err
 	}
 	defer c.run("LOGOUT")
-	if _, err := c.run("SELECT INBOX"); err != nil {
+	if _, err := c.run(fmt.Sprintf("SELECT %q", safeFolder)); err != nil {
 		return nil, err
 	}
 	searchRaw, err := c.run("UID SEARCH ALL")
@@ -2204,10 +2611,10 @@ func (s *Server) inboxForAccount(ctx context.Context, account WebmailAccount, pa
 		}
 		internalDate := parseIMAPInternalDate(raw)
 		items = append(items, InboxItem{
-			MessageID:    account.AccountID + ":INBOX:" + uidText,
+			MessageID:    account.AccountID + ":" + safeFolder + ":" + uidText,
 			AccountID:    account.AccountID,
 			AccountEmail: account.Email,
-			Folder:       "INBOX",
+			Folder:       safeFolder,
 			UID:          uidText,
 			From:         headers["from"],
 			To:           headers["to"],
@@ -2753,6 +3160,58 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 501, "NOT_IMPLEMENTED", "use mailbox settings endpoint")
 		return
 	}
+	if len(parts) == 2 && parts[1] == "folders" && r.Method == http.MethodGet {
+		account, password, err := s.resolveWebmailAccount(r.Context(), sess, accountID)
+		if err != nil {
+			if err.Error() == "account not found" {
+				writeErr(w, 404, "NOT_FOUND", "account not found")
+			} else if err.Error() == "mailbox session invalid" {
+				writeErr(w, 401, "AUTH_FAILED", err.Error())
+			} else {
+				writeErr(w, 500, "DB_ERROR", err.Error())
+			}
+			return
+		}
+		items, err := s.listFoldersForAccount(r.Context(), account, password)
+		if err != nil {
+			writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "items": items})
+		return
+	}
+	if len(parts) == 4 && parts[1] == "folders" && parts[3] == "messages" && r.Method == http.MethodGet {
+		folder, err := normalizeIMAPFolder(parts[2])
+		if err != nil {
+			writeErr(w, 400, "BAD_REQUEST", err.Error())
+			return
+		}
+		limit := s.cfg.WebmailInboxLimitDefault
+		if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+			if n, convErr := strconv.Atoi(raw); convErr == nil {
+				limit = n
+			}
+		}
+		limit = min(max(1, limit), max(1, s.cfg.WebmailInboxLimitMax))
+		account, password, err := s.resolveWebmailAccount(r.Context(), sess, accountID)
+		if err != nil {
+			if err.Error() == "account not found" {
+				writeErr(w, 404, "NOT_FOUND", "account not found")
+			} else if err.Error() == "mailbox session invalid" {
+				writeErr(w, 401, "AUTH_FAILED", err.Error())
+			} else {
+				writeErr(w, 500, "DB_ERROR", err.Error())
+			}
+			return
+		}
+		items, err := s.messagesForAccount(r.Context(), account, password, folder, limit)
+		if err != nil {
+			writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "items": items})
+		return
+	}
 	if len(parts) == 5 && parts[1] == "folders" && parts[3] == "messages" && r.Method == http.MethodGet {
 		folder, err := normalizeIMAPFolder(parts[2])
 		if err != nil {
@@ -2805,6 +3264,136 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 			"html":          msg["html"],
 			"attachments":   msg["attachments"],
 		}})
+		return
+	}
+	if len(parts) == 7 && parts[1] == "folders" && parts[3] == "messages" && parts[5] == "delete" && r.Method == http.MethodPost {
+		folder, err := normalizeIMAPFolder(parts[2])
+		if err != nil {
+			writeErr(w, 400, "BAD_REQUEST", err.Error())
+			return
+		}
+		uid := strings.TrimSpace(parts[4])
+		account, password, err := s.resolveWebmailAccount(r.Context(), sess, accountID)
+		if err != nil {
+			writeErr(w, 401, "AUTH_FAILED", err.Error())
+			return
+		}
+		if err := s.deleteMessage(r.Context(), account.Email, password, folder, uid); err != nil {
+			writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true})
+		return
+	}
+	if len(parts) == 7 && parts[1] == "folders" && parts[3] == "messages" && parts[5] == "move" && r.Method == http.MethodPost {
+		folder, err := normalizeIMAPFolder(parts[2])
+		if err != nil {
+			writeErr(w, 400, "BAD_REQUEST", err.Error())
+			return
+		}
+		uid := strings.TrimSpace(parts[4])
+		var req struct {
+			TargetFolder string `json:"target_folder"`
+		}
+		if err := readJSON(r, &req); err != nil {
+			writeErr(w, 400, "BAD_REQUEST", "Invalid JSON body")
+			return
+		}
+		targetFolder, err := normalizeIMAPFolder(req.TargetFolder)
+		if err != nil {
+			writeErr(w, 400, "BAD_REQUEST", err.Error())
+			return
+		}
+		account, password, err := s.resolveWebmailAccount(r.Context(), sess, accountID)
+		if err != nil {
+			writeErr(w, 401, "AUTH_FAILED", err.Error())
+			return
+		}
+		if err := s.moveMessage(r.Context(), account.Email, password, folder, uid, targetFolder); err != nil {
+			writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true})
+		return
+	}
+	if len(parts) == 7 && parts[1] == "folders" && parts[3] == "messages" && parts[5] == "junk" && r.Method == http.MethodPost {
+		folder, err := normalizeIMAPFolder(parts[2])
+		if err != nil {
+			writeErr(w, 400, "BAD_REQUEST", err.Error())
+			return
+		}
+		uid := strings.TrimSpace(parts[4])
+		account, password, err := s.resolveWebmailAccount(r.Context(), sess, accountID)
+		if err != nil {
+			writeErr(w, 401, "AUTH_FAILED", err.Error())
+			return
+		}
+		if err := s.moveMessage(r.Context(), account.Email, password, folder, uid, "Junk"); err != nil {
+			writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "drafts" && r.Method == http.MethodPost {
+		var req struct {
+			To      string `json:"to"`
+			Cc      string `json:"cc"`
+			Bcc     string `json:"bcc"`
+			Subject string `json:"subject"`
+			Body    string `json:"body"`
+		}
+		if err := readJSON(r, &req); err != nil {
+			writeErr(w, 400, "BAD_REQUEST", "Invalid JSON body")
+			return
+		}
+		account, password, err := s.resolveWebmailAccount(r.Context(), sess, accountID)
+		if err != nil {
+			writeErr(w, 401, "AUTH_FAILED", err.Error())
+			return
+		}
+		if err := s.saveDraft(r.Context(), account.Email, password, req.To, req.Cc, req.Bcc, req.Subject, req.Body); err != nil {
+			writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "folder": "Drafts"})
+		return
+	}
+	if len(parts) == 4 && parts[1] == "drafts" && (r.Method == http.MethodPut || r.Method == http.MethodDelete) {
+		uid := strings.TrimSpace(parts[3])
+		account, password, err := s.resolveWebmailAccount(r.Context(), sess, accountID)
+		if err != nil {
+			writeErr(w, 401, "AUTH_FAILED", err.Error())
+			return
+		}
+		if r.Method == http.MethodDelete {
+			if err := s.expungeMessage(r.Context(), account.Email, password, "Drafts", uid); err != nil {
+				writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
+				return
+			}
+			writeJSON(w, 200, map[string]any{"ok": true})
+			return
+		}
+		var req struct {
+			To      string `json:"to"`
+			Cc      string `json:"cc"`
+			Bcc     string `json:"bcc"`
+			Subject string `json:"subject"`
+			Body    string `json:"body"`
+		}
+		if err := readJSON(r, &req); err != nil {
+			writeErr(w, 400, "BAD_REQUEST", "Invalid JSON body")
+			return
+		}
+		if err := s.expungeMessage(r.Context(), account.Email, password, "Drafts", uid); err != nil {
+			writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
+			return
+		}
+		if err := s.saveDraft(r.Context(), account.Email, password, req.To, req.Cc, req.Bcc, req.Subject, req.Body); err != nil {
+			writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "folder": "Drafts"})
 		return
 	}
 	writeErr(w, 404, "NOT_FOUND", "Route not found")
@@ -2893,7 +3482,7 @@ func (s *Server) handleMailInbox(w http.ResponseWriter, r *http.Request) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			items, err := s.inboxForAccount(r.Context(), acc, accountPasswords[acc.AccountID], limit)
+			items, err := s.messagesForAccount(r.Context(), acc, accountPasswords[acc.AccountID], "INBOX", limit)
 			results <- inboxResult{Account: acc, Items: items, Err: err}
 		}(account)
 	}
@@ -2932,6 +3521,8 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		AccountID string `json:"account_id"`
 		To        string `json:"to"`
+		Cc        string `json:"cc"`
+		Bcc       string `json:"bcc"`
 		Subject   string `json:"subject"`
 		Body      string `json:"body"`
 	}
@@ -2955,13 +3546,14 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if err := s.portalSendMail(r.Context(), account.Email, password, req.To, req.Subject, req.Body); err != nil {
+	sentSaved, warning, err := s.portalSendMail(r.Context(), account.Email, password, req.To, req.Cc, req.Bcc, req.Subject, req.Body)
+	if err != nil {
 		s.registerLoginFailure(sendKey)
 		writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
 		return
 	}
 	s.clearLoginFailure(sendKey)
-	writeJSON(w, 200, map[string]any{"ok": true})
+	writeJSON(w, 200, map[string]any{"ok": true, "sent_saved": sentSaved, "warning": warning})
 }
 func (s *Server) routeTenants(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/v1/tenants" {
