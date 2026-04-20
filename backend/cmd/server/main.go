@@ -1466,26 +1466,10 @@ func parseHeaderBlock(raw []byte) map[string]string {
 	}
 }
 
-func normalizePreview(raw string, limit int) string {
-	body := strings.ReplaceAll(raw, "\r", "")
-	lines := []string{}
-	for _, line := range strings.Split(body, "\n") {
-		t := strings.TrimSpace(line)
-		if t == "" {
-			continue
-		}
-		lines = append(lines, t)
-		if len(strings.Join(lines, " ")) >= limit {
-			break
-		}
-	}
-	joined := strings.Join(lines, " ")
-	r := []rune(joined)
-	if len(r) > limit {
-		return string(r[:limit]) + "…"
-	}
-	return joined
-}
+const (
+	inboxPreviewFetchBytes  = 64 * 1024
+	inboxPreviewParseRecent = 25
+)
 
 func readRedisResponse(rd *bufio.Reader) (string, error) {
 	line, err := rd.ReadString('\n')
@@ -2002,8 +1986,8 @@ func (s *Server) portalInbox(ctx context.Context, mailboxEmail, password string,
 		selected[i], selected[j] = selected[j], selected[i]
 	}
 	items := make([]WebmailMessage, 0, len(selected))
-	for _, seq := range selected {
-		raw, fetchErr := c.run(fmt.Sprintf("UID FETCH %d (UID RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)] BODY.PEEK[TEXT])", seq))
+	for i, seq := range selected {
+		raw, fetchErr := c.run(fmt.Sprintf("UID FETCH %d (UID RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)] BODY.PEEK[]<0.%d>)", seq, inboxPreviewFetchBytes))
 		if fetchErr != nil {
 			continue
 		}
@@ -2013,8 +1997,8 @@ func (s *Server) portalInbox(ctx context.Context, mailboxEmail, password string,
 		if len(literals) > 0 {
 			headers = parseHeaderBlock(literals[0])
 		}
-		if len(literals) > 1 {
-			preview = normalizePreview(string(literals[1]), 160)
+		if i < inboxPreviewParseRecent && len(literals) > 1 {
+			preview = buildMIMEPreview(literals[1], inboxPreviewFetchBytes, 160)
 		}
 		uid := ""
 		if m := regexp.MustCompile(`UID\s+([0-9]+)`).FindStringSubmatch(raw); len(m) > 1 {
@@ -2196,8 +2180,8 @@ func (s *Server) inboxForAccount(ctx context.Context, account WebmailAccount, pa
 		selected[i], selected[j] = selected[j], selected[i]
 	}
 	items := make([]InboxItem, 0, len(selected))
-	for _, uid := range selected {
-		raw, fetchErr := c.run(fmt.Sprintf("UID FETCH %d (UID RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)] BODY.PEEK[TEXT])", uid))
+	for i, uid := range selected {
+		raw, fetchErr := c.run(fmt.Sprintf("UID FETCH %d (UID RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)] BODY.PEEK[]<0.%d>)", uid, inboxPreviewFetchBytes))
 		if fetchErr != nil {
 			continue
 		}
@@ -2207,8 +2191,8 @@ func (s *Server) inboxForAccount(ctx context.Context, account WebmailAccount, pa
 		if len(literals) > 0 {
 			headers = parseHeaderBlock(literals[0])
 		}
-		if len(literals) > 1 {
-			preview = normalizePreview(string(literals[1]), 180)
+		if i < inboxPreviewParseRecent && len(literals) > 1 {
+			preview = buildMIMEPreview(literals[1], inboxPreviewFetchBytes, 180)
 		}
 		uidText := strconv.Itoa(uid)
 		if m := regexp.MustCompile(`UID\s+([0-9]+)`).FindStringSubmatch(raw); len(m) > 1 {

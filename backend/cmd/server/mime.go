@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/microcosm-cc/bluemonday"
+	"golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
 )
 
@@ -216,4 +217,91 @@ func normalizeHeaderDate(v string) string {
 		return t.UTC().Format(time.RFC3339)
 	}
 	return trimmed
+}
+
+func buildMIMEPreview(raw []byte, maxBytes int64, maxChars int) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	if maxBytes <= 0 {
+		maxBytes = 64 * 1024
+	}
+	if maxChars <= 0 {
+		maxChars = 180
+	}
+	if int64(len(raw)) > maxBytes {
+		raw = raw[:maxBytes]
+	}
+	parsed, err := parseMIMEEmail(raw, maxBytes)
+	if err != nil {
+		return ""
+	}
+	text := strings.TrimSpace(parsed.Text)
+	if text == "" {
+		text = htmlToPlainText(parsed.HTML)
+	}
+	return cleanPreviewText(text, maxChars)
+}
+
+func htmlToPlainText(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return ""
+	}
+	node, err := html.Parse(strings.NewReader(v))
+	if err != nil {
+		return strings.TrimSpace(v)
+	}
+	parts := make([]string, 0, 16)
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.TextNode {
+			trimmed := strings.TrimSpace(n.Data)
+			if trimmed != "" {
+				parts = append(parts, trimmed)
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(node)
+	return strings.Join(parts, " ")
+}
+
+func cleanPreviewText(v string, maxChars int) string {
+	if strings.TrimSpace(v) == "" {
+		return ""
+	}
+	lines := strings.Split(strings.ReplaceAll(v, "\r", "\n"), "\n")
+	cleaned := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "content-type:") ||
+			strings.HasPrefix(lower, "content-transfer-encoding:") ||
+			strings.HasPrefix(lower, "content-disposition:") ||
+			strings.HasPrefix(lower, "content-id:") ||
+			strings.HasPrefix(lower, "mime-version:") ||
+			strings.HasPrefix(lower, "boundary=") ||
+			strings.HasPrefix(trimmed, "--") {
+			continue
+		}
+		cleaned = append(cleaned, trimmed)
+	}
+	joined := strings.Join(cleaned, " ")
+	joined = strings.Join(strings.Fields(joined), " ")
+	if joined == "" {
+		return ""
+	}
+	if maxChars <= 0 {
+		maxChars = 180
+	}
+	runes := []rune(joined)
+	if len(runes) <= maxChars {
+		return joined
+	}
+	return strings.TrimSpace(string(runes[:maxChars])) + "…"
 }

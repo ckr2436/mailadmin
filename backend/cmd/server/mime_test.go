@@ -181,3 +181,57 @@ func TestParseMIMEEmailCorruptAttachmentDecodeKeepsBody(t *testing.T) {
 		t.Fatalf("unexpected filename: %q", parsed.Attachments[0].Filename)
 	}
 }
+
+func TestBuildMIMEPreviewMultipartReport(t *testing.T) {
+	raw := []byte("Content-Type: multipart/report; boundary=rep\r\n\r\n--rep\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nDelivery failed for user@example.com\r\n--rep\r\nContent-Type: message/delivery-status\r\n\r\nStatus: 5.1.1\r\n--rep--\r\n")
+	preview := buildMIMEPreview(raw, 64*1024, 180)
+	if !strings.Contains(preview, "Delivery failed") {
+		t.Fatalf("expected report text in preview, got %q", preview)
+	}
+	if strings.Contains(strings.ToLower(preview), "content-type:") {
+		t.Fatalf("preview should not contain mime headers: %q", preview)
+	}
+}
+
+func TestBuildMIMEPreviewQuotedPrintable(t *testing.T) {
+	raw := []byte("Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nHello=20quoted=20printable")
+	preview := buildMIMEPreview(raw, 64*1024, 180)
+	if preview != "Hello quoted printable" {
+		t.Fatalf("unexpected quoted-printable preview: %q", preview)
+	}
+}
+
+func TestBuildMIMEPreviewBase64Text(t *testing.T) {
+	raw := []byte("Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\nSGVsbG8gYmFzZTY0IHByZXZpZXc=")
+	preview := buildMIMEPreview(raw, 64*1024, 180)
+	if preview != "Hello base64 preview" {
+		t.Fatalf("unexpected base64 preview: %q", preview)
+	}
+}
+
+func TestBuildMIMEPreviewHTMLOnePart(t *testing.T) {
+	raw := []byte("Content-Type: text/html; charset=utf-8\r\n\r\n<html><body><h1>Title</h1><p>Only html content</p></body></html>")
+	preview := buildMIMEPreview(raw, 64*1024, 180)
+	if preview != "Title Only html content" {
+		t.Fatalf("unexpected html fallback preview: %q", preview)
+	}
+}
+
+func TestBuildMIMEPreviewMalformedMIME(t *testing.T) {
+	raw := []byte("Content-Type: multipart/mixed\r\n\r\n--oops\r\nContent-Type: text/plain\r\n\r\nbroken")
+	preview := buildMIMEPreview(raw, 64*1024, 180)
+	if preview != "" {
+		t.Fatalf("expected empty preview for malformed MIME, got %q", preview)
+	}
+}
+
+func TestBuildMIMEPreviewSkipsAttachmentContent(t *testing.T) {
+	raw := []byte("Content-Type: multipart/mixed; boundary=abc\r\n\r\n--abc\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nHello body\r\n--abc\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Disposition: attachment; filename=secret.txt\r\n\r\nATTACHMENT-SECRET-CONTENT\r\n--abc--\r\n")
+	preview := buildMIMEPreview(raw, 64*1024, 180)
+	if strings.Contains(preview, "ATTACHMENT-SECRET-CONTENT") {
+		t.Fatalf("attachment payload should not leak into preview: %q", preview)
+	}
+	if !strings.Contains(preview, "Hello body") {
+		t.Fatalf("expected body text in preview, got %q", preview)
+	}
+}

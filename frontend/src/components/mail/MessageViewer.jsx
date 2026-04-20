@@ -2,7 +2,7 @@ export function MessageViewer({ message }) {
   return (
     <div className="card webmail-pane">
       <b>Message</b>
-      <div className="mail-viewer" style={{ marginTop: 8 }}>
+      <div className="mail-viewer mail-viewer-spaced">
         {message ? (
           <>
             <div className="mail-viewer-meta"><b>{message.subject || '(No subject)'}</b></div>

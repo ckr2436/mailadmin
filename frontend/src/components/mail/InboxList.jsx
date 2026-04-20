@@ -1,7 +1,7 @@
 export function InboxList({ items, onSelect }) {
   return (
     <div className="card webmail-pane">
-      <div className="toolbar" style={{ marginBottom: 8 }}>
+      <div className="toolbar inbox-toolbar">
         <b>Inbox</b>
         <div className="grow" />
         <span className="smalltext">Recent 20 messages</span>
