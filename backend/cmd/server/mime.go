@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/microcosm-cc/bluemonday"
+	"golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
 )
 
@@ -216,4 +217,166 @@ func normalizeHeaderDate(v string) string {
 		return t.UTC().Format(time.RFC3339)
 	}
 	return trimmed
+}
+
+func buildMIMEPreview(raw []byte, maxBytes int64, maxChars int) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	if maxBytes <= 0 {
+		maxBytes = 64 * 1024
+	}
+	if maxChars <= 0 {
+		maxChars = 180
+	}
+	if int64(len(raw)) > maxBytes {
+		raw = raw[:maxBytes]
+	}
+	parsed, err := parseMIMEEmail(raw, maxBytes)
+	if err != nil {
+		return fallbackPreviewFromRaw(raw, maxChars)
+	}
+	text := strings.TrimSpace(parsed.Text)
+	if text == "" {
+		text = htmlToPlainText(parsed.HTML)
+	}
+	return cleanPreviewText(text, maxChars)
+}
+
+func fallbackPreviewFromRaw(raw []byte, maxChars int) string {
+	body := stripMessageHeaders(string(raw))
+	if strings.TrimSpace(body) == "" {
+		return ""
+	}
+	lines := strings.Split(strings.ReplaceAll(body, "\r", "\n"), "\n")
+	collected := make([]string, 0, len(lines))
+	inPartHeaders := false
+	partMediaType := ""
+	partAttachment := false
+	sawBoundary := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "--") {
+			inPartHeaders = true
+			partMediaType = ""
+			partAttachment = false
+			sawBoundary = true
+			continue
+		}
+		if inPartHeaders {
+			if trimmed == "" {
+				inPartHeaders = false
+				continue
+			}
+			lower := strings.ToLower(trimmed)
+			if strings.HasPrefix(lower, "content-type:") {
+				partMediaType = strings.TrimSpace(strings.SplitN(strings.TrimSpace(lower[len("content-type:"):]), ";", 2)[0])
+			}
+			if strings.HasPrefix(lower, "content-disposition:") {
+				if strings.Contains(lower, "attachment") || strings.Contains(lower, "filename=") {
+					partAttachment = true
+				}
+			}
+			continue
+		}
+		if trimmed == "" {
+			continue
+		}
+		if isLikelyBase64Line(trimmed) {
+			continue
+		}
+		if sawBoundary {
+			isTextPart := partMediaType == "" || strings.HasPrefix(partMediaType, "text/plain") || strings.HasPrefix(partMediaType, "text/html")
+			if !isTextPart || partAttachment {
+				continue
+			}
+		}
+		collected = append(collected, trimmed)
+	}
+	return cleanPreviewText(strings.Join(collected, "\n"), maxChars)
+}
+
+func stripMessageHeaders(raw string) string {
+	normalized := strings.ReplaceAll(raw, "\r\n", "\n")
+	if idx := strings.Index(normalized, "\n\n"); idx >= 0 {
+		return normalized[idx+2:]
+	}
+	return normalized
+}
+
+func isLikelyBase64Line(v string) bool {
+	if len(v) < 40 || strings.ContainsAny(v, " \t") {
+		return false
+	}
+	for _, r := range v {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '+' || r == '/' || r == '=' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func htmlToPlainText(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return ""
+	}
+	node, err := html.Parse(strings.NewReader(v))
+	if err != nil {
+		return strings.TrimSpace(v)
+	}
+	parts := make([]string, 0, 16)
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.TextNode {
+			trimmed := strings.TrimSpace(n.Data)
+			if trimmed != "" {
+				parts = append(parts, trimmed)
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(node)
+	return strings.Join(parts, " ")
+}
+
+func cleanPreviewText(v string, maxChars int) string {
+	if strings.TrimSpace(v) == "" {
+		return ""
+	}
+	lines := strings.Split(strings.ReplaceAll(v, "\r", "\n"), "\n")
+	cleaned := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "content-type:") ||
+			strings.HasPrefix(lower, "content-transfer-encoding:") ||
+			strings.HasPrefix(lower, "content-disposition:") ||
+			strings.HasPrefix(lower, "content-id:") ||
+			strings.HasPrefix(lower, "mime-version:") ||
+			strings.HasPrefix(lower, "boundary=") ||
+			strings.HasPrefix(trimmed, "--") {
+			continue
+		}
+		cleaned = append(cleaned, trimmed)
+	}
+	joined := strings.Join(cleaned, " ")
+	joined = strings.Join(strings.Fields(joined), " ")
+	if joined == "" {
+		return ""
+	}
+	if maxChars <= 0 {
+		maxChars = 180
+	}
+	runes := []rune(joined)
+	if len(runes) <= maxChars {
+		return joined
+	}
+	return strings.TrimSpace(string(runes[:maxChars])) + "…"
 }

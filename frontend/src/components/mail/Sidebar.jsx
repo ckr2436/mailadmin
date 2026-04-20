@@ -30,7 +30,7 @@ export function MailSidebar({ profile, aliases, onPasswordUpdate, passwordBusy, 
         <div><input name="new_password" type="password" placeholder="New password" /></div>
         <div><button disabled={passwordBusy}>{passwordBusy ? 'Updating...' : 'Update password'}</button></div>
       </form>
-      {passwordMessage?.text ? <div className={passwordMessage.kind} style={{ marginTop: 10 }}>{passwordMessage.text}</div> : null}
+      {passwordMessage?.text ? <div className={`${passwordMessage.kind} password-message`}>{passwordMessage.text}</div> : null}
     </aside>
   )
 }
