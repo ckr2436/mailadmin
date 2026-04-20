@@ -1744,7 +1744,6 @@ func (s *Server) listWebmailAccounts(ctx context.Context, sessionID string) ([]W
 	}
 	ids := strings.Split(idsRaw, "\n")
 	items := make([]WebmailAccount, 0, len(ids))
-	var firstGetErr error
 	for _, id := range ids {
 		accountID := strings.TrimSpace(id)
 		if accountID == "" {
@@ -1753,9 +1752,6 @@ func (s *Server) listWebmailAccounts(ctx context.Context, sessionID string) ([]W
 		accountKey := s.webmailSessionAccountKey(sessionID, accountID)
 		raw, err := s.redisRun(ctx, "GET", accountKey)
 		if err != nil {
-			if firstGetErr == nil {
-				firstGetErr = fmt.Errorf("get webmail account %q for session %q: %w", accountID, sessionID, err)
-			}
 			continue
 		}
 		if strings.TrimSpace(raw) == "" {
@@ -1781,7 +1777,7 @@ func (s *Server) listWebmailAccounts(ctx context.Context, sessionID string) ([]W
 		}
 		return items[i].ConnectedAt < items[j].ConnectedAt
 	})
-	return items, firstGetErr
+	return items, nil
 }
 
 func (s *Server) getWebmailAccount(ctx context.Context, sessionID, accountID string) (WebmailAccount, error) {
