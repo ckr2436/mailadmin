@@ -108,7 +108,7 @@ func TestParseMIMEEmailMalformedMIME(t *testing.T) {
 
 func TestRunLimitedLargeMessageGuard(t *testing.T) {
 	literalSize := 15*1024*1024 + 1
-	resp := fmt.Sprintf("* 1 FETCH (UID 7 RFC822.SIZE %d BODY[] {%d}\r\n", literalSize, literalSize)
+	resp := fmt.Sprintf("* 1 FETCH (UID 7 RFC822.SIZE %d BODY[] {%d}\r\n%s)\r\nA0001 OK done\r\n", literalSize, literalSize, strings.Repeat("a", literalSize))
 	c := &imapConn{
 		rd: bufio.NewReader(strings.NewReader(resp)),
 		wr: bufio.NewWriter(io.Discard),
@@ -116,6 +116,13 @@ func TestRunLimitedLargeMessageGuard(t *testing.T) {
 	_, err := c.runLimited("UID FETCH 7 (UID RFC822.SIZE BODY.PEEK[])", 15*1024*1024)
 	if err == nil || err != errLiteralTooLarge {
 		t.Fatalf("expected errLiteralTooLarge, got: %v", err)
+	}
+	line, readErr := c.rd.ReadString('\n')
+	if readErr != nil {
+		t.Fatalf("expected remaining response after oversized literal drain: %v", readErr)
+	}
+	if line != ")\r\n" {
+		t.Fatalf("unexpected post-drain line: %q", line)
 	}
 }
 

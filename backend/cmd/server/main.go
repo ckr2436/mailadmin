@@ -1401,10 +1401,13 @@ func (c *imapConn) runLimited(command string, maxLiteralBytes int) (string, erro
 		if m := literalLineRe.FindStringSubmatch(line); m != nil {
 			n, _ := strconv.Atoi(m[1])
 			if maxLiteralBytes > 0 {
-				maxLiteralBytes -= n
-				if maxLiteralBytes < 0 {
+				if n > maxLiteralBytes {
+					if _, err := io.CopyN(io.Discard, c.rd, int64(n)); err != nil {
+						return "", err
+					}
 					return out.String(), errLiteralTooLarge
 				}
+				maxLiteralBytes -= n
 			}
 			if n > 0 {
 				buf := make([]byte, n)
@@ -2038,12 +2041,20 @@ func (s *Server) portalMessage(ctx context.Context, mailboxEmail, password, fold
 	if _, err := c.run(fmt.Sprintf(`LOGIN %q %q`, mailboxEmail, password)); err != nil {
 		return nil, err
 	}
-	defer c.run("LOGOUT")
+	shouldLogout := true
+	defer func() {
+		if shouldLogout {
+			_, _ = c.run("LOGOUT")
+		}
+	}()
 	if _, err := c.run(fmt.Sprintf("SELECT %q", safeFolder)); err != nil {
 		return nil, err
 	}
 	raw, err := c.runLimited(fmt.Sprintf("UID FETCH %s (UID RFC822.SIZE BODY.PEEK[])", strings.TrimSpace(uid)), 15*1024*1024)
 	if err != nil {
+		if errors.Is(err, errLiteralTooLarge) {
+			shouldLogout = false
+		}
 		return nil, err
 	}
 	literals := extractLiterals(raw)
