@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import DOMPurify from 'dompurify'
 import { logoutPortal } from '../shared/auth'
 import {
   connectMailbox,
@@ -72,6 +73,19 @@ function MailApp() {
     ? activeAccountId === 'all' ? accounts[0].account_id : activeAccountId
     : ''
 
+  const renderMessageBody = (item) => {
+    const text = String(item?.text || '').trim()
+    if (text) {
+      return <pre className="mail-body">{text}</pre>
+    }
+    const html = String(item?.html || '').trim()
+    if (!html) {
+      return <pre className="mail-body" />
+    }
+    const sanitized = DOMPurify.sanitize(html, { FORBID_TAGS: ['img'] })
+    return <div className="mail-body" dangerouslySetInnerHTML={{ __html: sanitized }} />
+  }
+
   useEffect(() => {
     if (authError) handleSessionExpired()
   }, [authError])
@@ -136,7 +150,7 @@ function MailApp() {
               <div className="smalltext">Date: {messageQuery.data.item.date || ''}</div>
               <div className="smalltext">Account: {messageQuery.data.item.account_email || ''}</div>
               <hr />
-              <pre className="mail-body">{messageQuery.data.item.text || ''}</pre>
+              {renderMessageBody(messageQuery.data.item)}
             </div>
           ) : <div className="muted" style={{ padding: 12 }}>Select a message.</div>}
         </section>

@@ -1341,8 +1341,9 @@ type imapConn struct {
 }
 
 var (
-	literalLineRe  = regexp.MustCompile(`\{(\d+)\}\r\n$`)
-	literalBlockRe = regexp.MustCompile(`\{(\d+)\}\r\n`)
+	literalLineRe      = regexp.MustCompile(`\{(\d+)\}\r\n$`)
+	literalBlockRe     = regexp.MustCompile(`\{(\d+)\}\r\n`)
+	errLiteralTooLarge = errors.New("message too large")
 )
 
 func newIMAPConn(ctx context.Context, host string, port int) (*imapConn, error) {
@@ -1378,6 +1379,10 @@ func (c *imapConn) close() {
 }
 
 func (c *imapConn) run(command string) (string, error) {
+	return c.runLimited(command, 0)
+}
+
+func (c *imapConn) runLimited(command string, maxLiteralBytes int) (string, error) {
 	c.tag++
 	tag := fmt.Sprintf("A%04d", c.tag)
 	if _, err := c.wr.WriteString(tag + " " + command + "\r\n"); err != nil {
@@ -1395,6 +1400,12 @@ func (c *imapConn) run(command string) (string, error) {
 		out.WriteString(line)
 		if m := literalLineRe.FindStringSubmatch(line); m != nil {
 			n, _ := strconv.Atoi(m[1])
+			if maxLiteralBytes > 0 {
+				maxLiteralBytes -= n
+				if maxLiteralBytes < 0 {
+					return out.String(), errLiteralTooLarge
+				}
+			}
 			if n > 0 {
 				buf := make([]byte, n)
 				if _, err := io.ReadFull(c.rd, buf); err != nil {
@@ -2031,7 +2042,7 @@ func (s *Server) portalMessage(ctx context.Context, mailboxEmail, password, fold
 	if _, err := c.run(fmt.Sprintf("SELECT %q", safeFolder)); err != nil {
 		return nil, err
 	}
-	raw, err := c.run(fmt.Sprintf("UID FETCH %s (UID RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)] BODY.PEEK[TEXT])", strings.TrimSpace(uid)))
+	raw, err := c.runLimited(fmt.Sprintf("UID FETCH %s (UID RFC822.SIZE BODY.PEEK[])", strings.TrimSpace(uid)), 15*1024*1024)
 	if err != nil {
 		return nil, err
 	}
@@ -2039,13 +2050,9 @@ func (s *Server) portalMessage(ctx context.Context, mailboxEmail, password, fold
 	if !regexp.MustCompile(`UID\s+([0-9]+)`).MatchString(raw) || len(literals) == 0 {
 		return nil, fmt.Errorf("message not found")
 	}
-	headers := map[string]string{}
-	body := ""
-	if len(literals) > 0 {
-		headers = parseHeaderBlock(literals[0])
-	}
-	if len(literals) > 1 {
-		body = string(literals[1])
+	parsed, err := parseMIMEEmail(literals[0], 2*1024*1024)
+	if err != nil {
+		return nil, err
 	}
 	parsedUID := strings.TrimSpace(uid)
 	if m := regexp.MustCompile(`UID\s+([0-9]+)`).FindStringSubmatch(raw); len(m) > 1 {
@@ -2056,7 +2063,7 @@ func (s *Server) portalMessage(ctx context.Context, mailboxEmail, password, fold
 		size, _ = strconv.ParseInt(m[1], 10, 64)
 	}
 	return map[string]any{
-		"uid": parsedUID, "from": headers["from"], "to": headers["to"], "subject": headers["subject"], "date": headers["date"], "size": size, "body": body,
+		"uid": parsedUID, "from": parsed.From, "to": parsed.To, "subject": parsed.Subject, "date": parsed.Date, "size": size, "text": parsed.Text, "html": parsed.HTML, "attachments": parsed.Attachments,
 	}, nil
 }
 
@@ -2780,6 +2787,10 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 				writeErr(w, 404, "NOT_FOUND", "message not found")
 				return
 			}
+			if errors.Is(err, errLiteralTooLarge) || errors.Is(err, errTextBodyTooLarge) {
+				writeErr(w, 413, "MESSAGE_TOO_LARGE", "message too large")
+				return
+			}
 			writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
 			return
 		}
@@ -2792,8 +2803,9 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 			"from":          msg["from"],
 			"to":            msg["to"],
 			"date":          msg["date"],
-			"text":          msg["body"],
-			"attachments":   []any{},
+			"text":          msg["text"],
+			"html":          msg["html"],
+			"attachments":   msg["attachments"],
 		}})
 		return
 	}
