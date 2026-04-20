@@ -1375,6 +1375,9 @@ func newIMAPConn(ctx context.Context, host string, port int) (*imapConn, error) 
 }
 
 func (c *imapConn) close() {
+	if c == nil || c.conn == nil {
+		return
+	}
 	_ = c.conn.Close()
 }
 
@@ -1402,9 +1405,9 @@ func (c *imapConn) runLimited(command string, maxLiteralBytes int) (string, erro
 			n, _ := strconv.Atoi(m[1])
 			if maxLiteralBytes > 0 {
 				if n > maxLiteralBytes {
-					if _, err := io.CopyN(io.Discard, c.rd, int64(n)); err != nil {
-						return "", err
-					}
+					// Fast-fail on oversized literals instead of draining the payload.
+					// Draining can block for large messages and defeats the size guard.
+					c.close()
 					return out.String(), errLiteralTooLarge
 				}
 				maxLiteralBytes -= n

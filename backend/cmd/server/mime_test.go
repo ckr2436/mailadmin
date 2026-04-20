@@ -119,10 +119,13 @@ func TestRunLimitedLargeMessageGuard(t *testing.T) {
 	}
 	line, readErr := c.rd.ReadString('\n')
 	if readErr != nil {
-		t.Fatalf("expected remaining response after oversized literal drain: %v", readErr)
+		t.Fatalf("expected unread literal payload after fast-fail: %v", readErr)
 	}
-	if line != ")\r\n" {
-		t.Fatalf("unexpected post-drain line: %q", line)
+	if !strings.HasPrefix(line, strings.Repeat("a", 1024)) {
+		t.Fatalf("expected unread literal payload prefix, got len=%d", len(line))
+	}
+	if !strings.HasSuffix(line, ")\r\n") {
+		t.Fatalf("expected unread response suffix, got len=%d", len(line))
 	}
 }
 
