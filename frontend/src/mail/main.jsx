@@ -20,6 +20,7 @@ import {
   saveDraft,
   sendMessage,
 } from '../shared/webmail'
+import { visibleFolders } from './folderConfig'
 import '../styles.css'
 
 const queryClient = new QueryClient()
@@ -38,6 +39,7 @@ function MailApp() {
   const [selectedMessageRef, setSelectedMessageRef] = useState(null)
   const [composeOpen, setComposeOpen] = useState(false)
   const [addOpen, setAddOpen] = useState(false)
+  const [notice, setNotice] = useState('')
 
   const sessionQuery = useQuery({ queryKey: ['mailSession'], queryFn: getMailSession, retry: false })
   const accountsQuery = useQuery({ queryKey: ['mailAccounts'], queryFn: getMailAccounts, retry: false })
@@ -81,8 +83,9 @@ function MailApp() {
 
   const sendMutation = useMutation({
     mutationFn: sendMessage,
-    onSuccess: () => {
+    onSuccess: (res) => {
       setComposeOpen(false)
+      if (res?.warning) setNotice(res.warning)
       qc.invalidateQueries({ queryKey: ['mailInbox'] })
     },
   })
@@ -149,6 +152,8 @@ function MailApp() {
         <button className="ghost small" onClick={async () => { await logoutMailSession(); await logoutPortal(); window.location.href = '/' }}>Sign out</button>
       </header>
 
+      {notice ? <div className="mail-state warning">{notice}</div> : null}
+
       <div className="webmail-shell">
         <aside className="webmail-sidebar">
           <button className="small compose-button" onClick={() => setComposeOpen(true)}>Compose</button>
@@ -167,9 +172,7 @@ function MailApp() {
           ))}
           {activeAccountId !== 'all' ? (
             <div className="form-row">
-              {(folderItems.length ? folderItems : [{ path: 'INBOX', name: 'Inbox' }, { path: 'Sent', name: 'Sent' }, { path: 'Drafts', name: 'Drafts' }, { path: 'Junk', name: 'Junk' }, { path: 'Trash', name: 'Trash' }])
-                .filter((f) => ['INBOX', 'Sent', 'Drafts', 'Junk', 'Trash'].includes(f.path))
-                .map((folder) => (
+              {visibleFolders(folderItems).map((folder) => (
                   <button key={folder.path} type="button" className={`mailbox-link ${activeFolder === folder.path ? 'active' : ''}`} onClick={() => { setActiveFolder(folder.path); setSelectedMessageRef(null) }}>
                     {folder.name || folder.path}
                   </button>
@@ -224,27 +227,57 @@ function MailApp() {
               <header className="reader-header">
                 <h2 className="reader-subject">{selectedMessage.subject || '(No subject)'}</h2>
                 <div className="toolbar">
-                  <button
-                    className="secondary small"
-                    disabled={!selectedMessageRef?.account_id || deleteMutation.isPending}
-                    onClick={() => deleteMutation.mutate({ accountId: selectedMessageRef.account_id, folder: selectedMessageRef.folder || activeFolder, uid: selectedMessageRef.uid })}
-                  >
-                    {(selectedMessageRef?.folder || activeFolder) === 'Trash' ? 'Permanently delete' : 'Delete'}
-                  </button>
-                  <button
-                    className="secondary small"
-                    disabled={!selectedMessageRef?.account_id || moveMutation.isPending}
-                    onClick={() => moveMutation.mutate({ accountId: selectedMessageRef.account_id, folder: selectedMessageRef.folder || activeFolder, uid: selectedMessageRef.uid, target: 'INBOX' })}
-                  >
-                    Move to Inbox
-                  </button>
-                  <button
-                    className="secondary small"
-                    disabled={!selectedMessageRef?.account_id || junkMutation.isPending}
-                    onClick={() => junkMutation.mutate({ accountId: selectedMessageRef.account_id, folder: selectedMessageRef.folder || activeFolder, uid: selectedMessageRef.uid })}
-                  >
-                    Mark as Junk
-                  </button>
+                  {(() => {
+                    const folder = selectedMessageRef?.folder || activeFolder
+                    const accountId = selectedMessageRef?.account_id
+                    const uid = selectedMessageRef?.uid
+                    if (!accountId || !uid) return null
+
+                    if (folder === 'INBOX') {
+                      return (
+                        <>
+                          <button className="secondary small" disabled={moveMutation.isPending} onClick={() => moveMutation.mutate({ accountId, folder, uid, target: 'Archive' })}>
+                            Archive
+                          </button>
+                          <button className="secondary small" disabled={deleteMutation.isPending} onClick={() => deleteMutation.mutate({ accountId, folder, uid })}>
+                            Delete
+                          </button>
+                          <button className="secondary small" disabled={junkMutation.isPending} onClick={() => junkMutation.mutate({ accountId, folder, uid })}>
+                            Mark as Junk
+                          </button>
+                        </>
+                      )
+                    }
+                    if (folder === 'Archive' || folder === 'Junk') {
+                      return (
+                        <>
+                          <button className="secondary small" disabled={moveMutation.isPending} onClick={() => moveMutation.mutate({ accountId, folder, uid, target: 'INBOX' })}>
+                            Move to Inbox
+                          </button>
+                          <button className="secondary small" disabled={deleteMutation.isPending} onClick={() => deleteMutation.mutate({ accountId, folder, uid })}>
+                            Delete
+                          </button>
+                        </>
+                      )
+                    }
+                    if (folder === 'Trash') {
+                      return (
+                        <>
+                          <button className="secondary small" disabled={deleteMutation.isPending} onClick={() => deleteMutation.mutate({ accountId, folder, uid })}>
+                            Permanently delete
+                          </button>
+                          <button className="secondary small" disabled={moveMutation.isPending} onClick={() => moveMutation.mutate({ accountId, folder, uid, target: 'INBOX' })}>
+                            Move to Inbox
+                          </button>
+                        </>
+                      )
+                    }
+                    return (
+                      <button className="secondary small" disabled={deleteMutation.isPending} onClick={() => deleteMutation.mutate({ accountId, folder, uid })}>
+                        Delete
+                      </button>
+                    )
+                  })()}
                 </div>
                 <div className="reader-meta"><span>From:</span><span>{selectedMessage.from || ''}</span></div>
                 <div className="reader-meta"><span>To:</span><span>{selectedMessage.to || ''}</span></div>
