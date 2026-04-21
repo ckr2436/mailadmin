@@ -1493,6 +1493,15 @@ func (c *imapConn) appendMessage(folder string, flags []string, when time.Time, 
 	}
 }
 
+func uidScopedExpunge(c *imapConn, uid string) error {
+	targetUID := strings.TrimSpace(uid)
+	if targetUID == "" {
+		return fmt.Errorf("uid is required for expunge")
+	}
+	_, err := c.run(fmt.Sprintf("UID EXPUNGE %s", targetUID))
+	return err
+}
+
 func extractLiterals(raw string) [][]byte {
 	out := [][]byte{}
 	rest := raw
@@ -2185,8 +2194,7 @@ func (s *Server) moveMessage(ctx context.Context, mailboxEmail, password, source
 	if _, err := c.run(fmt.Sprintf(`UID STORE %s +FLAGS.SILENT (\Deleted)`, strings.TrimSpace(uid))); err != nil {
 		return err
 	}
-	_, err = c.run("EXPUNGE")
-	return err
+	return uidScopedExpunge(c, uid)
 }
 
 func (s *Server) deleteMessage(ctx context.Context, mailboxEmail, password, folder, uid string) error {
@@ -2210,8 +2218,7 @@ func (s *Server) deleteMessage(ctx context.Context, mailboxEmail, password, fold
 		if _, err := c.run(fmt.Sprintf(`UID STORE %s +FLAGS.SILENT (\Deleted)`, strings.TrimSpace(uid))); err != nil {
 			return err
 		}
-		_, err = c.run("EXPUNGE")
-		return err
+		return uidScopedExpunge(c, uid)
 	}
 	return s.moveMessage(ctx, mailboxEmail, password, safeFolder, uid, "Trash")
 }
@@ -2236,8 +2243,7 @@ func (s *Server) expungeMessage(ctx context.Context, mailboxEmail, password, fol
 	if _, err := c.run(fmt.Sprintf(`UID STORE %s +FLAGS.SILENT (\Deleted)`, strings.TrimSpace(uid))); err != nil {
 		return err
 	}
-	_, err = c.run("EXPUNGE")
-	return err
+	return uidScopedExpunge(c, uid)
 }
 
 func (s *Server) saveDraft(ctx context.Context, mailboxEmail, password string, to, cc, bcc, subject, body string) error {
