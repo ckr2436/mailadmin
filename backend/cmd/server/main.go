@@ -2253,7 +2253,7 @@ func (s *Server) saveDraft(ctx context.Context, mailboxEmail, password string, t
 	if err != nil {
 		return err
 	}
-	raw, err := buildOutgoingMessage(mailboxEmail, toList, ccList, bccList, subject, body)
+	raw, err := buildOutgoingMessage(mailboxEmail, toList, ccList, bccList, subject, body, false)
 	if err != nil {
 		return err
 	}
@@ -2275,11 +2275,11 @@ func parseRecipientList(raw string) ([]string, error) {
 	return rcpts, nil
 }
 
-func buildOutgoingMessage(from string, to []string, cc []string, bcc []string, subject string, body string) ([]byte, error) {
+func buildOutgoingMessage(from string, to []string, cc []string, bcc []string, subject string, body string, requireRecipients bool) ([]byte, error) {
 	if !emailRe.MatchString(strings.TrimSpace(from)) {
 		return nil, fmt.Errorf("invalid from address")
 	}
-	if len(to) == 0 && len(cc) == 0 && len(bcc) == 0 {
+	if requireRecipients && len(to) == 0 && len(cc) == 0 && len(bcc) == 0 {
 		return nil, fmt.Errorf("recipient is required")
 	}
 	dateHeader := time.Now().UTC().Format(time.RFC1123Z)
@@ -2387,7 +2387,7 @@ func (s *Server) portalSendMail(ctx context.Context, mailboxEmail, password, to,
 	if err != nil {
 		return false, "", err
 	}
-	rawMessage, err := buildOutgoingMessage(mailboxEmail, toList, ccList, bccList, subject, body)
+	rawMessage, err := buildOutgoingMessage(mailboxEmail, toList, ccList, bccList, subject, body, true)
 	if err != nil {
 		return false, "", err
 	}

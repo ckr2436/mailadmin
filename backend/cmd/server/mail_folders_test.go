@@ -32,7 +32,7 @@ func TestMergeDefaultFoldersFallback(t *testing.T) {
 }
 
 func TestBuildOutgoingMessage(t *testing.T) {
-	raw, err := buildOutgoingMessage("support@example.com", []string{"a@example.com"}, []string{"b@example.com"}, nil, "Hello", "Body")
+	raw, err := buildOutgoingMessage("support@example.com", []string{"a@example.com"}, []string{"b@example.com"}, nil, "Hello", "Body", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -41,6 +41,15 @@ func TestBuildOutgoingMessage(t *testing.T) {
 		if !strings.Contains(text, header) {
 			t.Fatalf("missing header %s", header)
 		}
+	}
+}
+
+func TestBuildOutgoingMessageAllowsDraftWithoutRecipients(t *testing.T) {
+	if _, err := buildOutgoingMessage("support@example.com", nil, nil, nil, "Hello", "Body", false); err != nil {
+		t.Fatalf("unexpected error for draft without recipients: %v", err)
+	}
+	if _, err := buildOutgoingMessage("support@example.com", nil, nil, nil, "Hello", "Body", true); err == nil {
+		t.Fatalf("expected recipient error for non-draft message")
 	}
 }
 
