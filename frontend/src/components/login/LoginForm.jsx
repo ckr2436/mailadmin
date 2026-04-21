@@ -10,7 +10,7 @@ export function LoginForm({ onSubmit, busy }) {
     setError('')
 
     if (!email.trim() || !password) {
-      setError('Please enter your email address and password.')
+      setError('请输入邮箱地址和密码。')
       return
     }
 
@@ -18,7 +18,7 @@ export function LoginForm({ onSubmit, busy }) {
       await onSubmit({ email: email.trim(), password })
       setPassword('')
     } catch (submitError) {
-      setError(submitError.message)
+      setError(submitError.message || '登录失败，请检查邮箱和密码。')
     }
   }
 
@@ -26,7 +26,7 @@ export function LoginForm({ onSubmit, busy }) {
     <form className="form-row" onSubmit={submit}>
       <div>
         <input
-          placeholder="Email address"
+          placeholder="邮箱地址"
           autoComplete="username"
           value={email}
           onChange={(event) => setEmail(event.target.value)}
@@ -35,14 +35,14 @@ export function LoginForm({ onSubmit, busy }) {
       <div>
         <input
           type="password"
-          placeholder="Password"
+          placeholder="密码"
           autoComplete="current-password"
           value={password}
           onChange={(event) => setPassword(event.target.value)}
         />
       </div>
       <div>
-        <button disabled={busy} type="submit">{busy ? 'Signing in...' : 'Sign in'}</button>
+        <button disabled={busy} type="submit">{busy ? '登录中...' : '登录'}</button>
       </div>
       {error ? <div className="error">{error}</div> : null}
     </form>
