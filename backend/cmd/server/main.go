@@ -3284,7 +3284,7 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 		}})
 		return
 	}
-	if len(parts) == 7 && parts[1] == "folders" && parts[3] == "messages" && parts[5] == "delete" && r.Method == http.MethodPost {
+	if len(parts) == 6 && parts[1] == "folders" && parts[3] == "messages" && parts[5] == "delete" && r.Method == http.MethodPost {
 		folder, err := normalizeIMAPFolder(parts[2])
 		if err != nil {
 			writeErr(w, 400, "BAD_REQUEST", err.Error())
@@ -3307,7 +3307,7 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true})
 		return
 	}
-	if len(parts) == 7 && parts[1] == "folders" && parts[3] == "messages" && parts[5] == "move" && r.Method == http.MethodPost {
+	if len(parts) == 6 && parts[1] == "folders" && parts[3] == "messages" && parts[5] == "move" && r.Method == http.MethodPost {
 		folder, err := normalizeIMAPFolder(parts[2])
 		if err != nil {
 			writeErr(w, 400, "BAD_REQUEST", err.Error())
@@ -3342,7 +3342,7 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true})
 		return
 	}
-	if len(parts) == 7 && parts[1] == "folders" && parts[3] == "messages" && parts[5] == "junk" && r.Method == http.MethodPost {
+	if len(parts) == 6 && parts[1] == "folders" && parts[3] == "messages" && parts[5] == "junk" && r.Method == http.MethodPost {
 		folder, err := normalizeIMAPFolder(parts[2])
 		if err != nil {
 			writeErr(w, 400, "BAD_REQUEST", err.Error())
