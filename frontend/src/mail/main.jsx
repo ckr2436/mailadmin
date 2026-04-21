@@ -30,7 +30,7 @@ function formatDateLabel(value) {
   if (!value) return ''
   const dt = new Date(value)
   if (Number.isNaN(dt.getTime())) return value
-  return dt.toLocaleString()
+  return dt.toLocaleString('zh-CN')
 }
 
 function MailApp() {
@@ -152,19 +152,19 @@ function MailApp() {
   return (
     <div className="webmail-app">
       <header className="webmail-topbar">
-        <div className="brand">myupona Mail</div>
+        <div className="brand">MYUPONA 邮箱</div>
         <span className="badge">{sessionQuery.data?.session?.primary_email || '...'}</span>
         <div className="grow" />
-        <button className="secondary small" onClick={() => qc.invalidateQueries({ queryKey: ['mailInbox'] })}>Refresh</button>
-        <button className="ghost small" onClick={async () => { await logoutMailSession(); await logoutPortal(); window.location.href = '/' }}>Sign out</button>
+        <button className="secondary small" onClick={() => qc.invalidateQueries({ queryKey: ['mailInbox'] })}>刷新</button>
+        <button className="ghost small" onClick={async () => { await logoutMailSession(); await logoutPortal(); window.location.href = '/' }}>退出</button>
       </header>
 
       {notice ? <div className="mail-state warning webmail-notice">{notice}</div> : null}
 
       <div className="webmail-shell">
         <aside className="webmail-sidebar">
-          <button className="small compose-button" onClick={() => setComposeOpen(true)}>Compose</button>
-          <button className={`mailbox-link ${activeAccountId === 'all' ? 'active' : ''}`} onClick={() => { setActiveAccountId('all'); setActiveFolder('INBOX'); setSelectedMessageRef(null) }}>All Inboxes</button>
+          <button className="small compose-button" onClick={() => setComposeOpen(true)}>写信</button>
+          <button className={`mailbox-link ${activeAccountId === 'all' ? 'active' : ''}`} onClick={() => { setActiveAccountId('all'); setActiveFolder('INBOX'); setSelectedMessageRef(null) }}>全部收件箱</button>
           {accounts.map((account) => (
             <div key={account.account_id} className="mailbox-row">
               <button
@@ -174,7 +174,7 @@ function MailApp() {
               >
                 <span className="line-clamp-1">{account.email}</span>
               </button>
-              <button className="ghost small" onClick={() => disconnectMutation.mutate(account.account_id)}>×</button>
+              <button className="ghost small" aria-label="移除邮箱" onClick={() => disconnectMutation.mutate(account.account_id)}>×</button>
             </div>
           ))}
           {activeAccountId !== 'all' ? (
@@ -186,25 +186,25 @@ function MailApp() {
                 ))}
             </div>
           ) : null}
-          <button className="ghost small add-mailbox-button" onClick={() => setAddOpen((v) => !v)}>+ Add mailbox</button>
+          <button className="ghost small add-mailbox-button" onClick={() => setAddOpen((v) => !v)}>+ 添加邮箱</button>
           {addOpen ? (
             <form className="form-row" onSubmit={(e) => {
               e.preventDefault()
               const fd = new FormData(e.currentTarget)
               connectMutation.mutate({ email: String(fd.get('email') || ''), password: String(fd.get('password') || '') })
             }}>
-              <input name="email" placeholder="support@domain.com" />
-              <input name="password" type="password" placeholder="Password" />
-              <button disabled={connectMutation.isPending}>{connectMutation.isPending ? 'Connecting...' : 'Connect'}</button>
+              <input name="email" placeholder="邮箱地址" />
+              <input name="password" type="password" placeholder="邮箱密码" />
+              <button disabled={connectMutation.isPending}>{connectMutation.isPending ? '连接中...' : '连接邮箱'}</button>
             </form>
           ) : null}
         </aside>
 
         <section className="inbox-column">
           <div className="mail-list" role="list">
-            {inboxQuery.isPending ? <div className="mail-state">Loading inbox…</div> : null}
-            {inboxQuery.isError ? <div className="mail-state error">Failed to load inbox.</div> : null}
-            {!inboxQuery.isPending && !inboxQuery.isError && !inboxItems.length ? <div className="mail-state muted">No messages</div> : null}
+            {inboxQuery.isPending ? <div className="mail-state">正在加载邮件...</div> : null}
+            {inboxQuery.isError ? <div className="mail-state error">邮件加载失败。</div> : null}
+            {!inboxQuery.isPending && !inboxQuery.isError && !inboxItems.length ? <div className="mail-state muted">暂无邮件</div> : null}
             {!inboxQuery.isPending && !inboxQuery.isError ? inboxItems.map((item) => (
               <button
                 key={item.message_id}
@@ -214,11 +214,11 @@ function MailApp() {
               >
                 <div className="mail-row-line">
                   <span className="badge mail-account-badge line-clamp-1">{item.account_email}</span>
-                  <b className="mail-from line-clamp-1">{item.from || '(unknown)'}</b>
+                  <b className="mail-from line-clamp-1">{item.from || '未知发件人'}</b>
                   <span className="grow" />
                   <span className="mail-date line-clamp-1">{formatDateLabel(item.internal_date || item.date || '')}</span>
                 </div>
-                <div className="mail-row-subject line-clamp-1">{item.subject || '(No subject)'}</div>
+                <div className="mail-row-subject line-clamp-1">{item.subject || '无主题'}</div>
                 <div className="mail-item-preview line-clamp-2">{item.preview || ''}</div>
               </button>
             )) : null}
@@ -226,13 +226,13 @@ function MailApp() {
         </section>
 
         <section className="reader-column">
-          {!selectedMessageRef ? <div className="mail-state muted">Select a message.</div> : null}
-          {selectedMessageRef && messageQuery.isPending ? <div className="mail-state">Loading message…</div> : null}
-          {selectedMessageRef && messageQuery.isError ? <div className="mail-state error">Failed to load message.</div> : null}
+          {!selectedMessageRef ? <div className="mail-state muted">请选择一封邮件。</div> : null}
+          {selectedMessageRef && messageQuery.isPending ? <div className="mail-state">正在加载邮件内容...</div> : null}
+          {selectedMessageRef && messageQuery.isError ? <div className="mail-state error">邮件内容加载失败。</div> : null}
           {selectedMessage ? (
             <article className="card webmail-pane webmail-reader">
               <header className="reader-header">
-                <h2 className="reader-subject">{selectedMessage.subject || '(No subject)'}</h2>
+                <h2 className="reader-subject">{selectedMessage.subject || '无主题'}</h2>
                 <div className="toolbar">
                   {(() => {
                     const folder = selectedMessageRef?.folder || activeFolder
@@ -244,13 +244,13 @@ function MailApp() {
                       return (
                         <>
                           <button className="secondary small" disabled={moveMutation.isPending} onClick={() => moveMutation.mutate({ accountId, folder, uid, target: 'Archive' })}>
-                            Archive
+                            归档
                           </button>
                           <button className="secondary small" disabled={deleteMutation.isPending} onClick={() => deleteMutation.mutate({ accountId, folder, uid })}>
-                            Delete
+                            删除
                           </button>
                           <button className="secondary small" disabled={junkMutation.isPending} onClick={() => junkMutation.mutate({ accountId, folder, uid })}>
-                            Mark as Junk
+                            标记为垃圾邮件
                           </button>
                         </>
                       )
@@ -259,10 +259,10 @@ function MailApp() {
                       return (
                         <>
                           <button className="secondary small" disabled={moveMutation.isPending} onClick={() => moveMutation.mutate({ accountId, folder, uid, target: 'INBOX' })}>
-                            Move to Inbox
+                            移回收件箱
                           </button>
                           <button className="secondary small" disabled={deleteMutation.isPending} onClick={() => deleteMutation.mutate({ accountId, folder, uid })}>
-                            Delete
+                            删除
                           </button>
                         </>
                       )
@@ -271,31 +271,31 @@ function MailApp() {
                       return (
                         <>
                           <button className="secondary small" disabled={deleteMutation.isPending} onClick={() => deleteMutation.mutate({ accountId, folder, uid })}>
-                            Permanently delete
+                            永久删除
                           </button>
                           <button className="secondary small" disabled={moveMutation.isPending} onClick={() => moveMutation.mutate({ accountId, folder, uid, target: 'INBOX' })}>
-                            Move to Inbox
+                            移回收件箱
                           </button>
                         </>
                       )
                     }
                     return (
                       <button className="secondary small" disabled={deleteMutation.isPending} onClick={() => deleteMutation.mutate({ accountId, folder, uid })}>
-                        Delete
+                        删除
                       </button>
                     )
                   })()}
                 </div>
-                <div className="reader-meta"><span>From:</span><span>{selectedMessage.from || ''}</span></div>
-                <div className="reader-meta"><span>To:</span><span>{selectedMessage.to || ''}</span></div>
-                <div className="reader-meta"><span>Date:</span><span>{formatDateLabel(selectedMessage.date || '')}</span></div>
-                <div className="reader-meta"><span>Account:</span><span>{selectedMessage.account_email || ''}</span></div>
+                <div className="reader-meta"><span>发件人：</span><span>{selectedMessage.from || ''}</span></div>
+                <div className="reader-meta"><span>收件人：</span><span>{selectedMessage.to || ''}</span></div>
+                <div className="reader-meta"><span>时间：</span><span>{formatDateLabel(selectedMessage.date || '')}</span></div>
+                <div className="reader-meta"><span>邮箱：</span><span>{selectedMessage.account_email || ''}</span></div>
               </header>
               {(selectedMessage.attachments || []).length ? (
-                <section className="attachment-bar" aria-label="attachments">
+                <section className="attachment-bar" aria-label="附件">
                   {(selectedMessage.attachments || []).map((att, index) => (
                     <div key={`${att.filename || 'file'}-${index}`} className="attachment-chip">
-                      <span className="line-clamp-1">{att.filename || '(unnamed file)'}</span>
+                      <span className="line-clamp-1">{att.filename || '未命名文件'}</span>
                       <small>{att.content_type || 'application/octet-stream'}</small>
                       <small>{Number(att.size || 0).toLocaleString()} B</small>
                     </div>
@@ -307,7 +307,7 @@ function MailApp() {
                   ? <div className="mail-body mail-text-body">{selectedMessage.text}</div>
                   : sanitizedHTML
                     ? <div className="mail-body" dangerouslySetInnerHTML={{ __html: sanitizedHTML }} />
-                    : <div className="mail-state muted">Message body is empty.</div>}
+                    : <div className="mail-state muted">邮件正文为空。</div>}
               </section>
             </article>
           ) : null}
@@ -316,7 +316,7 @@ function MailApp() {
 
       {composeOpen ? (
         <div className="card compose-drawer">
-          <div className="toolbar"><b>Compose</b><div className="grow" /><button className="ghost small" onClick={() => setComposeOpen(false)}>Close</button></div>
+          <div className="toolbar"><b>写信</b><div className="grow" /><button className="ghost small" onClick={() => setComposeOpen(false)}>关闭</button></div>
           <form className="form-row" onSubmit={(e) => {
             e.preventDefault()
             const fd = new FormData(e.currentTarget)
@@ -330,12 +330,12 @@ function MailApp() {
             })
           }}>
             <select name="account_id" defaultValue={defaultFrom}>{accounts.map((account) => <option key={account.account_id} value={account.account_id}>{account.email}</option>)}</select>
-            <input name="to" placeholder="To" />
-            <input name="cc" placeholder="Cc" />
-            <input name="bcc" placeholder="Bcc" />
-            <input name="subject" placeholder="Subject" />
-            <textarea name="body" rows={7} placeholder="Message body" />
-            <button disabled={sendMutation.isPending}>{sendMutation.isPending ? 'Sending...' : 'Send'}</button>
+            <input name="to" placeholder="收件人" />
+            <input name="cc" placeholder="抄送 Cc" />
+            <input name="bcc" placeholder="密送 Bcc" />
+            <input name="subject" placeholder="主题" />
+            <textarea name="body" rows={7} placeholder="邮件正文" />
+            <button disabled={sendMutation.isPending}>{sendMutation.isPending ? '发送中...' : '发送'}</button>
             <button
               type="button"
               className="secondary"
@@ -355,7 +355,7 @@ function MailApp() {
                 })
               }}
             >
-              {draftMutation.isPending ? 'Saving draft...' : 'Save draft'}
+              {draftMutation.isPending ? '正在保存草稿...' : '保存草稿'}
             </button>
           </form>
         </div>
