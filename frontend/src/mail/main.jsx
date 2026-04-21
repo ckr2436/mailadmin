@@ -21,6 +21,7 @@ import {
   sendMessage,
 } from '../shared/webmail'
 import { visibleFolders } from './folderConfig'
+import { getSendNoticeOnError, getSendNoticeOnMutate, getSendNoticeOnSuccess } from './sendNoticeState'
 import '../styles.css'
 
 const queryClient = new QueryClient()
@@ -83,10 +84,16 @@ function MailApp() {
 
   const sendMutation = useMutation({
     mutationFn: sendMessage,
+    onMutate: () => {
+      setNotice(getSendNoticeOnMutate())
+    },
     onSuccess: (res) => {
       setComposeOpen(false)
-      if (res?.warning) setNotice(res.warning)
+      setNotice(getSendNoticeOnSuccess(res))
       qc.invalidateQueries({ queryKey: ['mailInbox'] })
+    },
+    onError: () => {
+      setNotice(getSendNoticeOnError())
     },
   })
   const draftMutation = useMutation({
