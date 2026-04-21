@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/mail"
@@ -2298,7 +2299,8 @@ func buildOutgoingMessage(from string, to []string, cc []string, bcc []string, s
 	if len(cc) > 0 {
 		msg.WriteString("Cc: " + strings.Join(cc, ", ") + "\r\n")
 	}
-	msg.WriteString("Subject: " + sanitizeMailHeader(subject) + "\r\n")
+	encodedSubject := mime.QEncoding.Encode("utf-8", sanitizeMailHeader(subject))
+	msg.WriteString("Subject: " + encodedSubject + "\r\n")
 	msg.WriteString("Date: " + dateHeader + "\r\n")
 	msg.WriteString("Message-ID: " + msgID + "\r\n")
 	msg.WriteString("MIME-Version: 1.0\r\n")
@@ -2310,6 +2312,24 @@ func buildOutgoingMessage(from string, to []string, cc []string, bcc []string, s
 		msg.WriteString("\r\n")
 	}
 	return msg.Bytes(), nil
+}
+
+func isFolderMessageActionRoute(parts []string, method string, action string) bool {
+	return len(parts) == 6 &&
+		parts[1] == "folders" &&
+		parts[3] == "messages" &&
+		parts[5] == action &&
+		method == http.MethodPost
+}
+
+func draftUIDFromRouteParts(parts []string, method string) (string, bool) {
+	if len(parts) != 3 || parts[1] != "drafts" {
+		return "", false
+	}
+	if method != http.MethodPut && method != http.MethodDelete {
+		return "", false
+	}
+	return parts[2], true
 }
 
 func randomStringToken(n int) string {
@@ -3290,7 +3310,7 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 		}})
 		return
 	}
-	if len(parts) == 6 && parts[1] == "folders" && parts[3] == "messages" && parts[5] == "delete" && r.Method == http.MethodPost {
+	if isFolderMessageActionRoute(parts, r.Method, "delete") {
 		folder, err := normalizeIMAPFolder(parts[2])
 		if err != nil {
 			writeErr(w, 400, "BAD_REQUEST", err.Error())
@@ -3313,7 +3333,7 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true})
 		return
 	}
-	if len(parts) == 6 && parts[1] == "folders" && parts[3] == "messages" && parts[5] == "move" && r.Method == http.MethodPost {
+	if isFolderMessageActionRoute(parts, r.Method, "move") {
 		folder, err := normalizeIMAPFolder(parts[2])
 		if err != nil {
 			writeErr(w, 400, "BAD_REQUEST", err.Error())
@@ -3348,7 +3368,7 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true})
 		return
 	}
-	if len(parts) == 6 && parts[1] == "folders" && parts[3] == "messages" && parts[5] == "junk" && r.Method == http.MethodPost {
+	if isFolderMessageActionRoute(parts, r.Method, "junk") {
 		folder, err := normalizeIMAPFolder(parts[2])
 		if err != nil {
 			writeErr(w, 400, "BAD_REQUEST", err.Error())
@@ -3395,8 +3415,8 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true, "folder": "Drafts"})
 		return
 	}
-	if len(parts) == 4 && parts[1] == "drafts" && (r.Method == http.MethodPut || r.Method == http.MethodDelete) {
-		uid, err := normalizeSingleUID(parts[3])
+	if uid, ok := draftUIDFromRouteParts(parts, r.Method); ok {
+		uid, err := normalizeSingleUID(uid)
 		if err != nil {
 			writeErr(w, 400, "BAD_REQUEST", err.Error())
 			return

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +45,17 @@ func TestBuildOutgoingMessage(t *testing.T) {
 	}
 }
 
+func TestBuildOutgoingMessageEncodesNonASCIISubject(t *testing.T) {
+	raw, err := buildOutgoingMessage("support@example.com", []string{"a@example.com"}, nil, nil, "你好📨", "Body", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, "Subject: =?utf-8?") {
+		t.Fatalf("expected RFC2047 encoded subject, got %q", text)
+	}
+}
+
 func TestBuildOutgoingMessageAllowsDraftWithoutRecipients(t *testing.T) {
 	if _, err := buildOutgoingMessage("support@example.com", nil, nil, nil, "Hello", "Body", false); err != nil {
 		t.Fatalf("unexpected error for draft without recipients: %v", err)
@@ -75,5 +87,29 @@ func TestNormalizeIMAPFolderAllowedOnly(t *testing.T) {
 	}
 	if got, err := normalizeIMAPFolder("INBOX"); err != nil || got != "INBOX" {
 		t.Fatalf("expected INBOX normalized, got %q err=%v", got, err)
+	}
+}
+
+func TestDraftUIDFromRouteParts(t *testing.T) {
+	uid, ok := draftUIDFromRouteParts([]string{"acc_xxx", "drafts", "123"}, http.MethodPut)
+	if !ok || uid != "123" {
+		t.Fatalf("expected put drafts route to match, got ok=%v uid=%q", ok, uid)
+	}
+	uid, ok = draftUIDFromRouteParts([]string{"acc_xxx", "drafts", "123"}, http.MethodDelete)
+	if !ok || uid != "123" {
+		t.Fatalf("expected delete drafts route to match, got ok=%v uid=%q", ok, uid)
+	}
+	if _, ok := draftUIDFromRouteParts([]string{"acc_xxx", "drafts", "123", "extra"}, http.MethodPut); ok {
+		t.Fatalf("expected invalid drafts route length to fail")
+	}
+}
+
+func TestIsFolderMessageActionRouteLenSix(t *testing.T) {
+	parts := []string{"acc_xxx", "folders", "INBOX", "messages", "123", "move"}
+	if !isFolderMessageActionRoute(parts, http.MethodPost, "move") {
+		t.Fatalf("expected move route to match len(parts)==6")
+	}
+	if isFolderMessageActionRoute(parts[:5], http.MethodPost, "move") {
+		t.Fatalf("expected short route to fail")
 	}
 }
