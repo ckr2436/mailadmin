@@ -1970,6 +1970,17 @@ func normalizeIMAPFolder(raw string) (string, error) {
 	}
 }
 
+func normalizeSingleUID(raw string) (string, error) {
+	uid := strings.TrimSpace(raw)
+	if uid == "" {
+		return "", fmt.Errorf("invalid message reference")
+	}
+	if _, err := strconv.Atoi(uid); err != nil {
+		return "", fmt.Errorf("invalid message reference")
+	}
+	return uid, nil
+}
+
 func (s *Server) resolveWebmailAccount(ctx context.Context, sess *Session, accountID string) (WebmailAccount, string, error) {
 	account, err := s.getWebmailAccount(ctx, sess.SessionID, accountID)
 	if err != nil {
@@ -2487,6 +2498,17 @@ func folderMap(items []MailFolder) map[string]MailFolder {
 func mergeDefaultFolders(items []MailFolder) []MailFolder {
 	merged := make([]MailFolder, 0, len(defaultMailFolders)+len(items))
 	existing := folderMap(items)
+	used := map[string]bool{}
+	rolePreferred := map[string]MailFolder{}
+	for _, item := range items {
+		if item.Role == "custom" || strings.TrimSpace(item.Role) == "" {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(item.Role))
+		if _, ok := rolePreferred[key]; !ok {
+			rolePreferred[key] = item
+		}
+	}
 	for _, def := range defaultMailFolders {
 		if item, ok := existing[strings.ToLower(def.Path)]; ok {
 			if item.Role == "custom" {
@@ -2495,23 +2517,23 @@ func mergeDefaultFolders(items []MailFolder) []MailFolder {
 				item.Name = def.Name
 			}
 			merged = append(merged, item)
+			used[strings.ToLower(strings.TrimSpace(item.Path))] = true
+			continue
+		}
+		if item, ok := rolePreferred[strings.ToLower(def.Role)]; ok {
+			merged = append(merged, item)
+			used[strings.ToLower(strings.TrimSpace(item.Path))] = true
 			continue
 		}
 		merged = append(merged, def)
 	}
 	for _, item := range items {
-		if _, ok := existing[strings.ToLower(item.Path)]; ok {
-			found := false
-			for _, m := range merged {
-				if strings.EqualFold(m.Path, item.Path) {
-					found = true
-					break
-				}
-			}
-			if !found && item.Role == "custom" {
-				merged = append(merged, item)
-			}
+		key := strings.ToLower(strings.TrimSpace(item.Path))
+		if key == "" || used[key] {
+			continue
 		}
+		merged = append(merged, item)
+		used[key] = true
 	}
 	return merged
 }
@@ -3218,12 +3240,8 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "BAD_REQUEST", err.Error())
 			return
 		}
-		uid := strings.TrimSpace(parts[4])
-		if folder == "" || uid == "" {
-			writeErr(w, 400, "BAD_REQUEST", "invalid message reference")
-			return
-		}
-		if _, err := strconv.Atoi(uid); err != nil {
+		uid, err := normalizeSingleUID(parts[4])
+		if folder == "" || err != nil {
 			writeErr(w, 400, "BAD_REQUEST", "invalid message reference")
 			return
 		}
@@ -3272,7 +3290,11 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "BAD_REQUEST", err.Error())
 			return
 		}
-		uid := strings.TrimSpace(parts[4])
+		uid, err := normalizeSingleUID(parts[4])
+		if err != nil {
+			writeErr(w, 400, "BAD_REQUEST", err.Error())
+			return
+		}
 		account, password, err := s.resolveWebmailAccount(r.Context(), sess, accountID)
 		if err != nil {
 			writeErr(w, 401, "AUTH_FAILED", err.Error())
@@ -3291,7 +3313,11 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "BAD_REQUEST", err.Error())
 			return
 		}
-		uid := strings.TrimSpace(parts[4])
+		uid, err := normalizeSingleUID(parts[4])
+		if err != nil {
+			writeErr(w, 400, "BAD_REQUEST", err.Error())
+			return
+		}
 		var req struct {
 			TargetFolder string `json:"target_folder"`
 		}
@@ -3322,7 +3348,11 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "BAD_REQUEST", err.Error())
 			return
 		}
-		uid := strings.TrimSpace(parts[4])
+		uid, err := normalizeSingleUID(parts[4])
+		if err != nil {
+			writeErr(w, 400, "BAD_REQUEST", err.Error())
+			return
+		}
 		account, password, err := s.resolveWebmailAccount(r.Context(), sess, accountID)
 		if err != nil {
 			writeErr(w, 401, "AUTH_FAILED", err.Error())
@@ -3360,7 +3390,11 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 4 && parts[1] == "drafts" && (r.Method == http.MethodPut || r.Method == http.MethodDelete) {
-		uid := strings.TrimSpace(parts[3])
+		uid, err := normalizeSingleUID(parts[3])
+		if err != nil {
+			writeErr(w, 400, "BAD_REQUEST", err.Error())
+			return
+		}
 		account, password, err := s.resolveWebmailAccount(r.Context(), sess, accountID)
 		if err != nil {
 			writeErr(w, 401, "AUTH_FAILED", err.Error())
@@ -3385,11 +3419,11 @@ func (s *Server) handleMailAccountItem(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "BAD_REQUEST", "Invalid JSON body")
 			return
 		}
-		if err := s.expungeMessage(r.Context(), account.Email, password, "Drafts", uid); err != nil {
+		if err := s.saveDraft(r.Context(), account.Email, password, req.To, req.Cc, req.Bcc, req.Subject, req.Body); err != nil {
 			writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
 			return
 		}
-		if err := s.saveDraft(r.Context(), account.Email, password, req.To, req.Cc, req.Bcc, req.Subject, req.Body); err != nil {
+		if err := s.expungeMessage(r.Context(), account.Email, password, "Drafts", uid); err != nil {
 			writeErr(w, 502, "MAIL_BACKEND_ERROR", err.Error())
 			return
 		}
