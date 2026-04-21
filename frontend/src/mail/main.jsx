@@ -159,7 +159,7 @@ function MailApp() {
         <button className="ghost small" onClick={async () => { await logoutMailSession(); await logoutPortal(); window.location.href = '/' }}>Sign out</button>
       </header>
 
-      {notice ? <div className="mail-state warning">{notice}</div> : null}
+      {notice ? <div className="mail-state warning webmail-notice">{notice}</div> : null}
 
       <div className="webmail-shell">
         <aside className="webmail-sidebar">
