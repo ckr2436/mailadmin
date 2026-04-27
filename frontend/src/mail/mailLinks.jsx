@@ -63,12 +63,47 @@ export function hasVisibleMailHTML(sanitizedHTML) {
 
   template.content.querySelectorAll('script, style, noscript, template').forEach((node) => node.remove())
 
-  const visibleText = String(template.content.textContent || '')
-    .replace(/\u00a0/g, ' ')
-    .replace(/[\u200B-\u200D\uFEFF]/g, '')
-    .trim()
+  const styleHidesElement = (styleText) => {
+    const normalized = String(styleText || '')
+      .toLowerCase()
+      .replace(/\s+/g, '')
+    return normalized.includes('display:none') || normalized.includes('visibility:hidden')
+  }
 
-  return visibleText.length > 0
+  const isHiddenElement = (element) => {
+    if (!element) return false
+    if (element.hasAttribute('hidden')) return true
+    if ((element.getAttribute('aria-hidden') || '').toLowerCase() === 'true') return true
+    return styleHidesElement(element.getAttribute('style'))
+  }
+
+  const textWalker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT)
+  let textNode = textWalker.nextNode()
+
+  while (textNode) {
+    let hidden = false
+    let parent = textNode.parentElement
+
+    while (parent) {
+      if (isHiddenElement(parent)) {
+        hidden = true
+        break
+      }
+      parent = parent.parentElement
+    }
+
+    if (!hidden) {
+      const visibleText = String(textNode.textContent || '')
+        .replace(/\u00a0/g, ' ')
+        .replace(/[\u200B-\u200D\uFEFF]/g, '')
+        .trim()
+      if (visibleText.length > 0) return true
+    }
+
+    textNode = textWalker.nextNode()
+  }
+
+  return false
 }
 
 function cleanPlainTextURL(value) {
