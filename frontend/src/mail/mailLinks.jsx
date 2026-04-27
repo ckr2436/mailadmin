@@ -31,8 +31,8 @@ export function sanitizeMailHTML(rawHTML) {
   if (!html) return ''
 
   const sanitized = DOMPurify.sanitize(html, {
-    FORBID_TAGS: ['img', 'script', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
-    FORBID_ATTR: ['src', 'srcset'],
+    FORBID_TAGS: ['img', 'script', 'style', 'link', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
+    FORBID_ATTR: ['src', 'srcset', 'style'],
   })
 
   const template = document.createElement('template')
