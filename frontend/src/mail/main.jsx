@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import DOMPurify from 'dompurify'
 import { logoutPortal } from '../shared/auth'
 import {
   connectMailbox,
@@ -21,6 +20,7 @@ import {
   sendMessage,
 } from '../shared/webmail'
 import { visibleFolders } from './folderConfig'
+import { buildPlainMailNodes, hasVisibleMailHTML, sanitizeMailHTML } from './mailLinks'
 import { getSendNoticeOnError, getSendNoticeOnMutate, getSendNoticeOnSuccess } from './sendNoticeState'
 import '../styles.css'
 
@@ -137,11 +137,13 @@ function MailApp() {
   const selectedMessageId = selectedMessageRef?.message_id
   const selectedMessage = messageQuery.data?.item
 
-  const sanitizedHTML = useMemo(() => {
-    const html = String(selectedMessage?.html || '').trim()
-    if (!html) return ''
-    return DOMPurify.sanitize(html, { FORBID_TAGS: ['img'] })
-  }, [selectedMessage?.html])
+  const sanitizedHTML = useMemo(() => sanitizeMailHTML(selectedMessage?.html || ''), [selectedMessage?.html])
+  const visibilityCheckedHTML = useMemo(
+    () => sanitizeMailHTML(selectedMessage?.html || '', { keepInlineStyles: true }),
+    [selectedMessage?.html],
+  )
+  const hasHTMLBody = useMemo(() => hasVisibleMailHTML(visibilityCheckedHTML), [visibilityCheckedHTML])
+  const plainTextNodes = useMemo(() => buildPlainMailNodes(selectedMessage?.text || ''), [selectedMessage?.text])
 
   useEffect(() => {
     if (authError) handleSessionExpired()
@@ -303,10 +305,10 @@ function MailApp() {
                 </section>
               ) : null}
               <section className="reader-body">
-                {String(selectedMessage.text || '').trim()
-                  ? <div className="mail-body mail-text-body">{selectedMessage.text}</div>
-                  : sanitizedHTML
-                    ? <div className="mail-body" dangerouslySetInnerHTML={{ __html: sanitizedHTML }} />
+                {hasHTMLBody
+                  ? <div className="mail-body mail-html-body" dangerouslySetInnerHTML={{ __html: sanitizedHTML }} />
+                  : String(selectedMessage.text || '').trim()
+                    ? <div className="mail-body mail-text-body">{plainTextNodes}</div>
                     : <div className="mail-state muted">邮件正文为空。</div>}
               </section>
             </article>
