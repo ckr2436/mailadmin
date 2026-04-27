@@ -264,6 +264,44 @@ function appendTextWithBareLinks(nodes, text, keyRef) {
   }
 }
 
+function splitParenthesizedURLLabel(prefix) {
+  const trailingWhitespace = prefix.match(/\s*$/)?.[0] || ''
+  const contentEnd = prefix.length - trailingWhitespace.length
+  if (contentEnd <= 0) {
+    return { beforeLabel: prefix, labelCandidate: '' }
+  }
+
+  const lineBreakIndex = Math.max(prefix.lastIndexOf('\n', contentEnd - 1), prefix.lastIndexOf('\r', contentEnd - 1))
+  const lineStart = lineBreakIndex + 1
+  const segment = prefix.slice(lineStart, contentEnd)
+  let labelStart = lineStart
+
+  const leadingConnector = segment.match(/^(\s*(?:(?:and|or)\b|[,&|,;，；]|以及|和|与|及|或)\s+)(\S[\s\S]*)$/i)
+  if (leadingConnector && isReadableLinkLabel(leadingConnector[2])) {
+    labelStart = lineStart + leadingConnector[1].length
+  } else {
+    const boundaryPattern = /[,;，；|]|\s[-–—]\s/g
+    let boundary
+    let lastBoundaryEnd = -1
+
+    while ((boundary = boundaryPattern.exec(segment)) !== null) {
+      lastBoundaryEnd = boundary.index + boundary[0].length
+    }
+
+    if (lastBoundaryEnd > -1) {
+      const candidate = segment.slice(lastBoundaryEnd)
+      if (isReadableLinkLabel(candidate)) {
+        labelStart = lineStart + lastBoundaryEnd
+      }
+    }
+  }
+
+  return {
+    beforeLabel: prefix.slice(0, labelStart),
+    labelCandidate: prefix.slice(labelStart, contentEnd),
+  }
+}
+
 export function buildPlainMailNodes(rawText) {
   const text = String(rawText || '').replace(/\r\n?/g, '\n')
   if (!text) return null
@@ -284,9 +322,7 @@ export function buildPlainMailNodes(rawText) {
     }
 
     const prefix = text.slice(cursor, openIndex)
-    const labelStart = prefix.lastIndexOf('\n') + 1
-    const beforeLabel = prefix.slice(0, labelStart)
-    const labelCandidate = prefix.slice(labelStart)
+    const { beforeLabel, labelCandidate } = splitParenthesizedURLLabel(prefix)
 
     if (isReadableLinkLabel(labelCandidate)) {
       appendTextWithBareLinks(nodes, beforeLabel, keyRef)
