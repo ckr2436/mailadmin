@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import DOMPurify from 'dompurify'
 import { logoutPortal } from '../shared/auth'
 import {
   connectMailbox,
@@ -21,186 +20,17 @@ import {
   sendMessage,
 } from '../shared/webmail'
 import { visibleFolders } from './folderConfig'
+import { buildPlainMailNodes, sanitizeMailHTML } from './mailLinks'
 import { getSendNoticeOnError, getSendNoticeOnMutate, getSendNoticeOnSuccess } from './sendNoticeState'
 import '../styles.css'
 
 const queryClient = new QueryClient()
-const MAX_LINK_LENGTH = 8192
-const SAFE_HTML_LINK_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:'])
-const SAFE_TEXT_LINK_PROTOCOLS = new Set(['http:', 'https:'])
 
 function formatDateLabel(value) {
   if (!value) return ''
   const dt = new Date(value)
   if (Number.isNaN(dt.getTime())) return value
   return dt.toLocaleString('zh-CN')
-}
-
-function normalizeProtocol(href) {
-  const match = String(href || '').trim().match(/^([a-z][a-z0-9+.-]*):/i)
-  return match ? `${match[1].toLowerCase()}:` : ''
-}
-
-function safeMailHref(rawHref, allowedProtocols = SAFE_HTML_LINK_PROTOCOLS) {
-  const href = String(rawHref || '').trim()
-  if (!href || href.length > MAX_LINK_LENGTH) return ''
-
-  const protocol = normalizeProtocol(href)
-  if (!protocol || !allowedProtocols.has(protocol)) return ''
-
-  try {
-    const parsed = new URL(href)
-    return allowedProtocols.has(parsed.protocol) ? parsed.href : ''
-  } catch {
-    return ''
-  }
-}
-
-function sanitizeMailHTML(rawHTML) {
-  const html = String(rawHTML || '').trim()
-  if (!html) return ''
-
-  const sanitized = DOMPurify.sanitize(html, {
-    FORBID_TAGS: ['img', 'script', 'style', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
-    FORBID_ATTR: ['src', 'srcset'],
-  })
-
-  const template = document.createElement('template')
-  template.innerHTML = sanitized
-
-  template.content.querySelectorAll('a[href]').forEach((anchor) => {
-    const href = safeMailHref(anchor.getAttribute('href') || '')
-    if (!href) {
-      anchor.removeAttribute('href')
-      anchor.removeAttribute('target')
-      anchor.removeAttribute('rel')
-      return
-    }
-    anchor.setAttribute('href', href)
-    anchor.setAttribute('target', '_blank')
-    anchor.setAttribute('rel', 'noopener noreferrer nofollow')
-  })
-
-  return template.innerHTML.trim()
-}
-
-function cleanPlainTextURL(value) {
-  return String(value || '')
-    .replace(/[\u200B-\u200D\uFEFF]/g, '')
-    .replace(/\s+/g, '')
-    .replace(/^<+|>+$/g, '')
-    .trim()
-}
-
-function stripTrailingURLPunctuation(value) {
-  let href = value
-  let suffix = ''
-  while (/[.,;:!?，。；：！？]$/.test(href)) {
-    suffix = href[href.length - 1] + suffix
-    href = href.slice(0, -1)
-  }
-  return { href, suffix }
-}
-
-function linkFallbackLabel(href) {
-  try {
-    const parsed = new URL(href)
-    return parsed.hostname ? `打开 ${parsed.hostname}` : '打开链接'
-  } catch {
-    return '打开链接'
-  }
-}
-
-function isReadableLinkLabel(value) {
-  const label = String(value || '').trim()
-  if (label.length < 2 || label.length > 120) return false
-  if (/https?:\/\//i.test(label)) return false
-  if (/^[\s:：>\-–—|/\\()[\]{}.,;!?，。；！？]+$/.test(label)) return false
-  return /[\p{L}\p{N}\u4e00-\u9fff]/u.test(label)
-}
-
-function normalizeLinkLabel(value, href) {
-  const label = String(value || '')
-    .replace(/[\t ]+/g, ' ')
-    .replace(/[：:：\-–—|>\s]+$/g, '')
-    .trim()
-  return isReadableLinkLabel(label) ? label : linkFallbackLabel(href)
-}
-
-function createMailLink(href, label, key) {
-  return (
-    <a
-      key={key}
-      className="plain-mail-link"
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer nofollow"
-      title={href}
-    >
-      {label}
-    </a>
-  )
-}
-
-function appendTextWithBareLinks(nodes, text, keyRef) {
-  if (!text) return
-
-  const bareURLPattern = /https?:\/\/[^\s<>()]+/gi
-  let cursor = 0
-  let match
-
-  while ((match = bareURLPattern.exec(text)) !== null) {
-    const rawCandidate = match[0]
-    const { href: strippedCandidate, suffix } = stripTrailingURLPunctuation(rawCandidate)
-    const href = safeMailHref(cleanPlainTextURL(strippedCandidate), SAFE_TEXT_LINK_PROTOCOLS)
-
-    if (!href) continue
-
-    if (match.index > cursor) {
-      nodes.push(text.slice(cursor, match.index))
-    }
-    nodes.push(createMailLink(href, linkFallbackLabel(href), `bare-link-${keyRef.current++}`))
-    if (suffix) nodes.push(suffix)
-    cursor = match.index + rawCandidate.length
-  }
-
-  if (cursor < text.length) {
-    nodes.push(text.slice(cursor))
-  }
-}
-
-function buildPlainMailNodes(rawText) {
-  const text = String(rawText || '').replace(/\r\n?/g, '\n')
-  if (!text) return null
-
-  const nodes = []
-  const keyRef = { current: 0 }
-  const parenthesizedURLPattern = /\(\s*(https?:\/\/[\s\S]*?)\s*\)/gi
-  let cursor = 0
-  let match
-
-  while ((match = parenthesizedURLPattern.exec(text)) !== null) {
-    const href = safeMailHref(cleanPlainTextURL(match[1]), SAFE_TEXT_LINK_PROTOCOLS)
-    if (!href) continue
-
-    const prefix = text.slice(cursor, match.index)
-    const labelStart = prefix.lastIndexOf('\n') + 1
-    const beforeLabel = prefix.slice(0, labelStart)
-    const labelCandidate = prefix.slice(labelStart)
-
-    if (isReadableLinkLabel(labelCandidate)) {
-      appendTextWithBareLinks(nodes, beforeLabel, keyRef)
-      nodes.push(createMailLink(href, normalizeLinkLabel(labelCandidate, href), `labeled-link-${keyRef.current++}`))
-    } else {
-      appendTextWithBareLinks(nodes, prefix, keyRef)
-      nodes.push(createMailLink(href, linkFallbackLabel(href), `parenthesized-link-${keyRef.current++}`))
-    }
-
-    cursor = match.index + match[0].length
-  }
-
-  appendTextWithBareLinks(nodes, text.slice(cursor), keyRef)
-  return nodes
 }
 
 function MailApp() {
