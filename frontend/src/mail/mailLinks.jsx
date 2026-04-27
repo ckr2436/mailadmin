@@ -28,19 +28,30 @@ function safeMailHref(rawHref, allowedProtocols = SAFE_HTML_LINK_PROTOCOLS) {
 }
 
 function styleHidesElement(styleText) {
-  const normalized = String(styleText || '')
-    .toLowerCase()
-    .replace(/\s+/g, '')
+  const declarations = String(styleText || '')
+    .split(';')
+    .map((declaration) => declaration.trim())
+    .filter(Boolean)
+    .reduce((acc, declaration) => {
+      const separator = declaration.indexOf(':')
+      if (separator <= 0) return acc
+      const property = declaration.slice(0, separator).trim().toLowerCase()
+      const value = declaration.slice(separator + 1).trim().toLowerCase()
+      if (property) acc[property] = value
+      return acc
+    }, {})
+
+  const isZeroCssValue = (value) => /^(?:[+-]?(?:0+|0*\.0+))(?:[a-z%]+)?$/i.test(String(value || '').trim())
 
   return (
-    normalized.includes('display:none')
-    || normalized.includes('visibility:hidden')
-    || normalized.includes('opacity:0')
-    || normalized.includes('max-height:0')
-    || normalized.includes('max-width:0')
-    || normalized.includes('font-size:0')
-    || normalized.includes('line-height:0')
-    || normalized.includes('mso-hide:all')
+    declarations.display === 'none'
+    || declarations.visibility === 'hidden'
+    || isZeroCssValue(declarations.opacity)
+    || isZeroCssValue(declarations['max-height'])
+    || isZeroCssValue(declarations['max-width'])
+    || isZeroCssValue(declarations['font-size'])
+    || isZeroCssValue(declarations['line-height'])
+    || declarations['mso-hide'] === 'all'
   )
 }
 
