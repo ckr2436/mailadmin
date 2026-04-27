@@ -6,6 +6,22 @@ const SAFE_HTML_LINK_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:'])
 const SAFE_TEXT_LINK_PROTOCOLS = new Set(['http:', 'https:'])
 const URL_START_PATTERN = /https?:\/\//gi
 const HIDDEN_MAIL_CLASS_OR_ID_PATTERN = /(^|[\s_-])(preheader|preview-text|previewtext|visually-hidden|sr-only)([\s_-]|$)/
+const FORBIDDEN_MAIL_HTML_TAGS = [
+  'img',
+  'script',
+  'style',
+  'link',
+  'iframe',
+  'object',
+  'embed',
+  'form',
+  'input',
+  'button',
+  'head',
+  'title',
+  'meta',
+  'base',
+]
 
 function normalizeProtocol(href) {
   const match = String(href || '').trim().match(/^([a-z][a-z0-9+.-]*):/i)
@@ -82,12 +98,15 @@ function styleHidesElement(styleText) {
 function isLikelyHiddenMailElement(element) {
   if (!element) return false
   if (element.hasAttribute('hidden')) return true
-  if ((element.getAttribute('aria-hidden') || '').toLowerCase() === 'true') return true
 
   const classAndId = `${element.className || ''} ${element.id || ''}`.toLowerCase()
   if (HIDDEN_MAIL_CLASS_OR_ID_PATTERN.test(classAndId)) return true
 
   return styleHidesElement(element.getAttribute('style'))
+}
+
+function removeNonBodyMetadata(root) {
+  root.querySelectorAll('head, title, meta, base, script, style, noscript, template').forEach((node) => node.remove())
 }
 
 export function sanitizeMailHTML(rawHTML, options = {}) {
@@ -96,12 +115,13 @@ export function sanitizeMailHTML(rawHTML, options = {}) {
   const { keepInlineStyles = false } = options
 
   const sanitized = DOMPurify.sanitize(html, {
-    FORBID_TAGS: ['img', 'script', 'style', 'link', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
+    FORBID_TAGS: FORBIDDEN_MAIL_HTML_TAGS,
     FORBID_ATTR: ['src', 'srcset'],
   })
 
   const template = document.createElement('template')
   template.innerHTML = sanitized
+  removeNonBodyMetadata(template.content)
 
   template.content.querySelectorAll('*').forEach((element) => {
     if (isLikelyHiddenMailElement(element)) {
@@ -137,8 +157,7 @@ export function hasVisibleMailHTML(sanitizedHTML) {
 
   const template = document.createElement('template')
   template.innerHTML = html
-
-  template.content.querySelectorAll('script, style, noscript, template').forEach((node) => node.remove())
+  removeNonBodyMetadata(template.content)
 
   const textWalker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT)
   let textNode = textWalker.nextNode()
