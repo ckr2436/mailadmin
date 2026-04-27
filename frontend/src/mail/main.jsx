@@ -20,7 +20,7 @@ import {
   sendMessage,
 } from '../shared/webmail'
 import { visibleFolders } from './folderConfig'
-import { buildPlainMailNodes, sanitizeMailHTML } from './mailLinks'
+import { buildPlainMailNodes, hasVisibleMailHTML, sanitizeMailHTML } from './mailLinks'
 import { getSendNoticeOnError, getSendNoticeOnMutate, getSendNoticeOnSuccess } from './sendNoticeState'
 import '../styles.css'
 
@@ -138,6 +138,7 @@ function MailApp() {
   const selectedMessage = messageQuery.data?.item
 
   const sanitizedHTML = useMemo(() => sanitizeMailHTML(selectedMessage?.html || ''), [selectedMessage?.html])
+  const hasHTMLBody = useMemo(() => hasVisibleMailHTML(sanitizedHTML), [sanitizedHTML])
   const plainTextNodes = useMemo(() => buildPlainMailNodes(selectedMessage?.text || ''), [selectedMessage?.text])
 
   useEffect(() => {
@@ -300,7 +301,7 @@ function MailApp() {
                 </section>
               ) : null}
               <section className="reader-body">
-                {sanitizedHTML
+                {hasHTMLBody
                   ? <div className="mail-body mail-html-body" dangerouslySetInnerHTML={{ __html: sanitizedHTML }} />
                   : String(selectedMessage.text || '').trim()
                     ? <div className="mail-body mail-text-body">{plainTextNodes}</div>
