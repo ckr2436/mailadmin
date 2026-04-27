@@ -54,6 +54,23 @@ export function sanitizeMailHTML(rawHTML) {
   return template.innerHTML.trim()
 }
 
+export function hasVisibleMailHTML(sanitizedHTML) {
+  const html = String(sanitizedHTML || '').trim()
+  if (!html) return false
+
+  const template = document.createElement('template')
+  template.innerHTML = html
+
+  template.content.querySelectorAll('script, style, noscript, template').forEach((node) => node.remove())
+
+  const visibleText = String(template.content.textContent || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim()
+
+  return visibleText.length > 0
+}
+
 function cleanPlainTextURL(value) {
   return String(value || '')
     .replace(/[\u200B-\u200D\uFEFF]/g, '')
