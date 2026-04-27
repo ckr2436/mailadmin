@@ -26,13 +26,14 @@ function safeMailHref(rawHref, allowedProtocols = SAFE_HTML_LINK_PROTOCOLS) {
   }
 }
 
-export function sanitizeMailHTML(rawHTML) {
+export function sanitizeMailHTML(rawHTML, options = {}) {
   const html = String(rawHTML || '').trim()
   if (!html) return ''
+  const { keepInlineStyles = false } = options
 
   const sanitized = DOMPurify.sanitize(html, {
     FORBID_TAGS: ['img', 'script', 'style', 'link', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
-    FORBID_ATTR: ['src', 'srcset', 'style'],
+    FORBID_ATTR: keepInlineStyles ? ['src', 'srcset'] : ['src', 'srcset', 'style'],
   })
 
   const template = document.createElement('template')

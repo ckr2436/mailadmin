@@ -138,7 +138,11 @@ function MailApp() {
   const selectedMessage = messageQuery.data?.item
 
   const sanitizedHTML = useMemo(() => sanitizeMailHTML(selectedMessage?.html || ''), [selectedMessage?.html])
-  const hasHTMLBody = useMemo(() => hasVisibleMailHTML(sanitizedHTML), [sanitizedHTML])
+  const visibilityCheckedHTML = useMemo(
+    () => sanitizeMailHTML(selectedMessage?.html || '', { keepInlineStyles: true }),
+    [selectedMessage?.html],
+  )
+  const hasHTMLBody = useMemo(() => hasVisibleMailHTML(visibilityCheckedHTML), [visibilityCheckedHTML])
   const plainTextNodes = useMemo(() => buildPlainMailNodes(selectedMessage?.text || ''), [selectedMessage?.text])
 
   useEffect(() => {
