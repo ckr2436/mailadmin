@@ -31,8 +31,8 @@ export function sanitizeMailHTML(rawHTML) {
   if (!html) return ''
 
   const sanitized = DOMPurify.sanitize(html, {
-    FORBID_TAGS: ['img', 'script', 'style', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
-    FORBID_ATTR: ['src', 'srcset', 'style'],
+    FORBID_TAGS: ['img', 'script', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
+    FORBID_ATTR: ['src', 'srcset'],
   })
 
   const template = document.createElement('template')
@@ -74,6 +74,10 @@ export function hasVisibleMailHTML(sanitizedHTML) {
     if (!element) return false
     if (element.hasAttribute('hidden')) return true
     if ((element.getAttribute('aria-hidden') || '').toLowerCase() === 'true') return true
+    const classAndId = `${element.className || ''} ${element.id || ''}`.toLowerCase()
+    if (/(^|[\s_-])(preheader|preview-text|previewtext|visually-hidden|sr-only)([\s_-]|$)/.test(classAndId)) {
+      return true
+    }
     return styleHidesElement(element.getAttribute('style'))
   }
 
