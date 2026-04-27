@@ -27,8 +27,17 @@ function safeMailHref(rawHref, allowedProtocols = SAFE_HTML_LINK_PROTOCOLS) {
   }
 }
 
-function styleHidesElement(styleText) {
-  const declarations = String(styleText || '')
+function normalizeCssValue(value) {
+  return String(value || '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\s*!\s*important\s*$/i, '')
+    .trim()
+    .toLowerCase()
+}
+
+function parseInlineStyle(styleText) {
+  return String(styleText || '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
     .split(';')
     .map((declaration) => declaration.trim())
     .filter(Boolean)
@@ -36,20 +45,37 @@ function styleHidesElement(styleText) {
       const separator = declaration.indexOf(':')
       if (separator <= 0) return acc
       const property = declaration.slice(0, separator).trim().toLowerCase()
-      const value = declaration.slice(separator + 1).trim().toLowerCase()
+      const value = normalizeCssValue(declaration.slice(separator + 1))
       if (property) acc[property] = value
       return acc
     }, {})
+}
 
-  const isZeroCssValue = (value) => /^(?:[+-]?(?:0+|0*\.0+))(?:[a-z%]+)?$/i.test(String(value || '').trim())
+function isZeroCssValue(value) {
+  const normalized = normalizeCssValue(value)
+  return /^(?:[+-]?(?:0+|0*\.0+))(?:[a-z%]+)?$/i.test(normalized)
+}
+
+function styleHidesElement(styleText) {
+  const declarations = parseInlineStyle(styleText)
+  const overflowHidden = ['hidden', 'clip'].includes(declarations.overflow)
+    || ['hidden', 'clip'].includes(declarations['overflow-x'])
+    || ['hidden', 'clip'].includes(declarations['overflow-y'])
+
+  const zeroSizedHiddenBox = overflowHidden && (
+    isZeroCssValue(declarations.height)
+    || isZeroCssValue(declarations['max-height'])
+    || isZeroCssValue(declarations.width)
+    || isZeroCssValue(declarations['max-width'])
+  )
 
   return (
     declarations.display === 'none'
     || declarations.visibility === 'hidden'
+    || declarations.visibility === 'collapse'
     || isZeroCssValue(declarations.opacity)
-    || isZeroCssValue(declarations['max-height'])
-    || isZeroCssValue(declarations['max-width'])
     || declarations['mso-hide'] === 'all'
+    || zeroSizedHiddenBox
   )
 }
 
