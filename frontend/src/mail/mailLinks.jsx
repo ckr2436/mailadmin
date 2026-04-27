@@ -49,8 +49,6 @@ function styleHidesElement(styleText) {
     || isZeroCssValue(declarations.opacity)
     || isZeroCssValue(declarations['max-height'])
     || isZeroCssValue(declarations['max-width'])
-    || isZeroCssValue(declarations['font-size'])
-    || isZeroCssValue(declarations['line-height'])
     || declarations['mso-hide'] === 'all'
   )
 }
