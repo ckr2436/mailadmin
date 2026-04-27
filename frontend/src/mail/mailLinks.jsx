@@ -5,6 +5,7 @@ const MAX_LINK_LENGTH = 8192
 const SAFE_HTML_LINK_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:'])
 const SAFE_TEXT_LINK_PROTOCOLS = new Set(['http:', 'https:'])
 const URL_START_PATTERN = /https?:\/\//gi
+const HIDDEN_MAIL_CLASS_OR_ID_PATTERN = /(^|[\s_-])(preheader|preview-text|previewtext|visually-hidden|sr-only)([\s_-]|$)/
 
 function normalizeProtocol(href) {
   const match = String(href || '').trim().match(/^([a-z][a-z0-9+.-]*):/i)
@@ -26,6 +27,34 @@ function safeMailHref(rawHref, allowedProtocols = SAFE_HTML_LINK_PROTOCOLS) {
   }
 }
 
+function styleHidesElement(styleText) {
+  const normalized = String(styleText || '')
+    .toLowerCase()
+    .replace(/\s+/g, '')
+
+  return (
+    normalized.includes('display:none')
+    || normalized.includes('visibility:hidden')
+    || normalized.includes('opacity:0')
+    || normalized.includes('max-height:0')
+    || normalized.includes('max-width:0')
+    || normalized.includes('font-size:0')
+    || normalized.includes('line-height:0')
+    || normalized.includes('mso-hide:all')
+  )
+}
+
+function isLikelyHiddenMailElement(element) {
+  if (!element) return false
+  if (element.hasAttribute('hidden')) return true
+  if ((element.getAttribute('aria-hidden') || '').toLowerCase() === 'true') return true
+
+  const classAndId = `${element.className || ''} ${element.id || ''}`.toLowerCase()
+  if (HIDDEN_MAIL_CLASS_OR_ID_PATTERN.test(classAndId)) return true
+
+  return styleHidesElement(element.getAttribute('style'))
+}
+
 export function sanitizeMailHTML(rawHTML, options = {}) {
   const html = String(rawHTML || '').trim()
   if (!html) return ''
@@ -33,11 +62,17 @@ export function sanitizeMailHTML(rawHTML, options = {}) {
 
   const sanitized = DOMPurify.sanitize(html, {
     FORBID_TAGS: ['img', 'script', 'style', 'link', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
-    FORBID_ATTR: keepInlineStyles ? ['src', 'srcset'] : ['src', 'srcset', 'style'],
+    FORBID_ATTR: ['src', 'srcset'],
   })
 
   const template = document.createElement('template')
   template.innerHTML = sanitized
+
+  template.content.querySelectorAll('*').forEach((element) => {
+    if (isLikelyHiddenMailElement(element)) {
+      element.remove()
+    }
+  })
 
   template.content.querySelectorAll('a[href]').forEach((anchor) => {
     const href = safeMailHref(anchor.getAttribute('href') || '')
@@ -52,6 +87,12 @@ export function sanitizeMailHTML(rawHTML, options = {}) {
     anchor.setAttribute('rel', 'noopener noreferrer nofollow')
   })
 
+  if (!keepInlineStyles) {
+    template.content.querySelectorAll('[style]').forEach((element) => {
+      element.removeAttribute('style')
+    })
+  }
+
   return template.innerHTML.trim()
 }
 
@@ -64,24 +105,6 @@ export function hasVisibleMailHTML(sanitizedHTML) {
 
   template.content.querySelectorAll('script, style, noscript, template').forEach((node) => node.remove())
 
-  const styleHidesElement = (styleText) => {
-    const normalized = String(styleText || '')
-      .toLowerCase()
-      .replace(/\s+/g, '')
-    return normalized.includes('display:none') || normalized.includes('visibility:hidden')
-  }
-
-  const isHiddenElement = (element) => {
-    if (!element) return false
-    if (element.hasAttribute('hidden')) return true
-    if ((element.getAttribute('aria-hidden') || '').toLowerCase() === 'true') return true
-    const classAndId = `${element.className || ''} ${element.id || ''}`.toLowerCase()
-    if (/(^|[\s_-])(preheader|preview-text|previewtext|visually-hidden|sr-only)([\s_-]|$)/.test(classAndId)) {
-      return true
-    }
-    return styleHidesElement(element.getAttribute('style'))
-  }
-
   const textWalker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT)
   let textNode = textWalker.nextNode()
 
@@ -90,7 +113,7 @@ export function hasVisibleMailHTML(sanitizedHTML) {
     let parent = textNode.parentElement
 
     while (parent) {
-      if (isHiddenElement(parent)) {
+      if (isLikelyHiddenMailElement(parent)) {
         hidden = true
         break
       }
