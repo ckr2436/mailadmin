@@ -48,6 +48,20 @@ export async function getMessage(accountId, uid, folder = 'INBOX') {
 }
 
 export async function sendMessage(payload) {
+  const attachments = Array.isArray(payload?.attachments) ? payload.attachments : []
+  if (attachments.length) {
+    const form = new FormData()
+    ;['account_id', 'to', 'cc', 'bcc', 'subject', 'body'].forEach((key) => {
+      form.append(key, String(payload?.[key] || ''))
+    })
+    attachments.forEach((file) => form.append('attachments', file))
+    return apiRequest('/api/v1/mail/send', {
+      method: 'POST',
+      body: form,
+      csrfCookieName: PORTAL_CSRF,
+    })
+  }
+
   return apiRequest('/api/v1/mail/send', {
     method: 'POST',
     body: payload,
