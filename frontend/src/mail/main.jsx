@@ -25,6 +25,7 @@ import { getSendNoticeOnError, getSendNoticeOnMutate, getSendNoticeOnSuccess } f
 import '../styles.css'
 
 const queryClient = new QueryClient()
+const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 
 function formatDateLabel(value) {
   if (!value) return ''
@@ -33,8 +34,15 @@ function formatDateLabel(value) {
   return dt.toLocaleString('zh-CN')
 }
 
+function formatBytes(value) {
+  const bytes = Number(value || 0)
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${bytes} B`
+}
+
 function safeAttachmentFilename(value, fallback = 'attachment') {
-  const name = String(value || '').trim().replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_')
+  const name = String(value || '').trim().replace(/[\\/:*?"<>|]/g, '_')
   return name || fallback
 }
 
@@ -65,6 +73,7 @@ function MailApp() {
   const [activeFolder, setActiveFolder] = useState('INBOX')
   const [selectedMessageRef, setSelectedMessageRef] = useState(null)
   const [composeOpen, setComposeOpen] = useState(false)
+  const [composeAttachments, setComposeAttachments] = useState([])
   const [addOpen, setAddOpen] = useState(false)
   const [notice, setNotice] = useState('')
 
@@ -115,6 +124,7 @@ function MailApp() {
     },
     onSuccess: (res) => {
       setComposeOpen(false)
+      setComposeAttachments([])
       setNotice(getSendNoticeOnSuccess(res))
       qc.invalidateQueries({ queryKey: ['mailInbox'] })
     },
@@ -170,6 +180,10 @@ function MailApp() {
   )
   const hasHTMLBody = useMemo(() => hasVisibleMailHTML(visibilityCheckedHTML), [visibilityCheckedHTML])
   const plainTextNodes = useMemo(() => buildPlainMailNodes(selectedMessage?.text || ''), [selectedMessage?.text])
+  const composeAttachmentTotal = useMemo(
+    () => composeAttachments.reduce((sum, file) => sum + Number(file?.size || 0), 0),
+    [composeAttachments],
+  )
 
   useEffect(() => {
     if (authError) handleSessionExpired()
@@ -355,9 +369,13 @@ function MailApp() {
 
       {composeOpen ? (
         <div className="card compose-drawer">
-          <div className="toolbar"><b>写信</b><div className="grow" /><button className="ghost small" onClick={() => setComposeOpen(false)}>关闭</button></div>
+          <div className="toolbar"><b>写信</b><div className="grow" /><button className="ghost small" onClick={() => { setComposeOpen(false); setComposeAttachments([]) }}>关闭</button></div>
           <form className="form-row" onSubmit={(e) => {
             e.preventDefault()
+            if (composeAttachmentTotal > MAX_ATTACHMENT_BYTES) {
+              setNotice('附件总大小不能超过 50MB。')
+              return
+            }
             const fd = new FormData(e.currentTarget)
             sendMutation.mutate({
               account_id: String(fd.get('account_id') || defaultFrom),
@@ -366,6 +384,7 @@ function MailApp() {
               bcc: String(fd.get('bcc') || ''),
               subject: String(fd.get('subject') || ''),
               body: String(fd.get('body') || ''),
+              attachments: composeAttachments,
             })
           }}>
             <select name="account_id" defaultValue={defaultFrom}>{accounts.map((account) => <option key={account.account_id} value={account.account_id}>{account.email}</option>)}</select>
@@ -374,6 +393,34 @@ function MailApp() {
             <input name="bcc" placeholder="密送 Bcc" />
             <input name="subject" placeholder="主题" />
             <textarea name="body" rows={7} placeholder="邮件正文" />
+            <input
+              name="attachments"
+              type="file"
+              multiple
+              onChange={(e) => {
+                const files = Array.from(e.currentTarget.files || [])
+                const total = files.reduce((sum, file) => sum + Number(file.size || 0), 0)
+                if (total > MAX_ATTACHMENT_BYTES) {
+                  setComposeAttachments([])
+                  e.currentTarget.value = ''
+                  setNotice('附件总大小不能超过 50MB。')
+                  return
+                }
+                setNotice('')
+                setComposeAttachments(files)
+              }}
+            />
+            {composeAttachments.length ? (
+              <div className="attachment-bar" aria-label="待发送附件">
+                {composeAttachments.map((file, index) => (
+                  <div key={`${file.name}-${index}`} className="attachment-chip">
+                    <span className="line-clamp-1">{file.name}</span>
+                    <small>{formatBytes(file.size)}</small>
+                  </div>
+                ))}
+                <small>合计 {formatBytes(composeAttachmentTotal)} / 50 MB</small>
+              </div>
+            ) : null}
             <button disabled={sendMutation.isPending}>{sendMutation.isPending ? '发送中...' : '发送'}</button>
             <button
               type="button"
