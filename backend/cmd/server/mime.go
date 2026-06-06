@@ -27,6 +27,7 @@ type ParsedAttachment struct {
 	Size        int64  `json:"size"`
 	Inline      bool   `json:"inline"`
 	ContentID   string `json:"content_id,omitempty"`
+	Data        string `json:"data,omitempty"`
 }
 
 type ParsedEmail struct {
@@ -140,14 +141,22 @@ func parseMIMEPart(h textproto.MIMEHeader, body io.Reader, state *mimeParseState
 		return nil
 	}
 
-	size, _ := io.Copy(io.Discard, decodedBody)
-	state.attachments = append(state.attachments, ParsedAttachment{
+	data, readErr := io.ReadAll(decodedBody)
+	if readErr != nil {
+		// Keep the attachment row visible even when a malformed transfer encoding cannot be decoded.
+		data = nil
+	}
+	attachment := ParsedAttachment{
 		Filename:    decodeHeaderWord(filename),
 		ContentType: mediaType,
-		Size:        size,
+		Size:        int64(len(data)),
 		Inline:      isInline,
 		ContentID:   strings.Trim(strings.TrimSpace(h.Get("Content-ID")), "<>"),
-	})
+	}
+	if len(data) > 0 {
+		attachment.Data = base64.StdEncoding.EncodeToString(data)
+	}
+	state.attachments = append(state.attachments, attachment)
 	return nil
 }
 
