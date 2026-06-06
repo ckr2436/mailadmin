@@ -1,7 +1,7 @@
 import { useState } from 'react'
 
 export function LoginForm({ onSubmit, busy }) {
-  const [email, setEmail] = useState('')
+  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
 
@@ -9,16 +9,16 @@ export function LoginForm({ onSubmit, busy }) {
     event.preventDefault()
     setError('')
 
-    if (!email.trim() || !password) {
-      setError('请输入邮箱地址和密码。')
+    if (!username.trim() || !password) {
+      setError('请输入用户名和密码。')
       return
     }
 
     try {
-      await onSubmit({ email: email.trim(), password })
+      await onSubmit({ username: username.trim(), password })
       setPassword('')
     } catch (submitError) {
-      setError(submitError.message || '登录失败，请检查邮箱和密码。')
+      setError(submitError.message || '登录失败，请检查用户名和密码。')
     }
   }
 
@@ -26,10 +26,10 @@ export function LoginForm({ onSubmit, busy }) {
     <form className="form-row" onSubmit={submit}>
       <div>
         <input
-          placeholder="邮箱地址"
+          placeholder="用户名"
           autoComplete="username"
-          value={email}
-          onChange={(event) => setEmail(event.target.value)}
+          value={username}
+          onChange={(event) => setUsername(event.target.value)}
         />
       </div>
       <div>
