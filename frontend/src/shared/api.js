@@ -10,12 +10,15 @@ export async function apiRequest(path, options = {}) {
   } = options
 
   const csrfToken = getCookieValue(csrfCookieName)
+  const isFormData = typeof FormData !== 'undefined' && body instanceof FormData
+  const baseHeaders = isFormData ? {} : { 'Content-Type': 'application/json' }
+
   const response = await fetch(path, {
     method,
-    body: body ? JSON.stringify(body) : undefined,
+    body: body ? (isFormData ? body : JSON.stringify(body)) : undefined,
     credentials: 'include',
     headers: {
-      'Content-Type': 'application/json',
+      ...baseHeaders,
       ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
       ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
       ...headers,
