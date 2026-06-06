@@ -33,6 +33,32 @@ function formatDateLabel(value) {
   return dt.toLocaleString('zh-CN')
 }
 
+function safeAttachmentFilename(value, fallback = 'attachment') {
+  const name = String(value || '').trim().replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_')
+  return name || fallback
+}
+
+function downloadAttachment(att, index) {
+  const base64 = String(att?.data || '')
+  if (!base64) return
+
+  const binary = atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i)
+  }
+
+  const blob = new Blob([bytes], { type: att?.content_type || 'application/octet-stream' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = safeAttachmentFilename(att?.filename, `attachment-${index + 1}`)
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
 function MailApp() {
   const qc = useQueryClient()
   const [activeAccountId, setActiveAccountId] = useState('all')
@@ -295,13 +321,24 @@ function MailApp() {
               </header>
               {(selectedMessage.attachments || []).length ? (
                 <section className="attachment-bar" aria-label="附件">
-                  {(selectedMessage.attachments || []).map((att, index) => (
-                    <div key={`${att.filename || 'file'}-${index}`} className="attachment-chip">
-                      <span className="line-clamp-1">{att.filename || '未命名文件'}</span>
-                      <small>{att.content_type || 'application/octet-stream'}</small>
-                      <small>{Number(att.size || 0).toLocaleString()} B</small>
-                    </div>
-                  ))}
+                  {(selectedMessage.attachments || []).map((att, index) => {
+                    const hasData = Boolean(att?.data)
+                    return (
+                      <div key={`${att.filename || 'file'}-${index}`} className="attachment-chip">
+                        <span className="line-clamp-1">{att.filename || '未命名文件'}</span>
+                        <small>{att.content_type || 'application/octet-stream'}</small>
+                        <small>{Number(att.size || 0).toLocaleString()} B</small>
+                        <button
+                          type="button"
+                          className="secondary small"
+                          disabled={!hasData}
+                          onClick={() => downloadAttachment(att, index)}
+                        >
+                          {hasData ? '下载' : '不可下载'}
+                        </button>
+                      </div>
+                    )
+                  })}
                 </section>
               ) : null}
               <section className="reader-body">
